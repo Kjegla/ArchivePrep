@@ -49,8 +49,8 @@ Requires [Python 3.10+](https://www.python.org/downloads/) - on Mac, install it
 from that link (the python.org installer includes everything needed).
 
 ```bash
-git clone https://github.com/Kjegla/Photo-Organizer-macOS.git
-cd Photo-Organizer-macOS
+git clone https://github.com/Kjegla/Photo-Organizer.git
+cd Photo-Organizer
 pip3 install -r requirements.txt
 python3 photo_organizer.py
 ```
