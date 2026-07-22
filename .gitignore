@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+build/
+dist/
+*.spec
+kjegla_media_log_*.txt
+kjegla_undo_*.json*
