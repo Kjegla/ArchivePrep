@@ -13,16 +13,16 @@ My Photos\
 
 ## Features
 
-- **Move or Copy** — copy mode never touches your originals
-- **Preview (dry run)** — see exactly what would happen before doing it
-- **Undo Last Run** — one click puts everything back
+- **Move or Copy** - copy mode never touches your originals
+- **Preview (dry run)** - see exactly what would happen before doing it
+- **Undo Last Run** - one click puts everything back
 - Date subfolders: none, year, month, or year + month
 - Reads real photo dates from EXIF, and real video dates from MP4/MOV metadata
 - iPhone **HEIC** photos supported (sorted by exact model)
 - RAW files (ARW, CR2, DNG, NEF, …) matched to their JPEG and sorted together
 - Optional separation of RAW files and Android screenshots into subfolders
 - Skips identical duplicates instead of piling up copies
-- Optional recursive scan of subfolders — safe to re-run any time
+- Optional recursive scan of subfolders - safe to re-run any time
 - Fast: multithreaded scanning, live progress with ETA
 
 ## Easiest way: download from Releases
@@ -45,7 +45,7 @@ Go to the [**Releases**](../../releases) page and grab the file for your compute
 
 ## Running from source (Windows/Mac/Linux)
 
-Requires [Python 3.10+](https://www.python.org/downloads/) — on Mac, install it
+Requires [Python 3.10+](https://www.python.org/downloads/) - on Mac, install it
 from that link (the python.org installer includes everything needed).
 
 ```bash
