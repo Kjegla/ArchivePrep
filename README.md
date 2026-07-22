@@ -25,24 +25,34 @@ My Photos\
 - Optional recursive scan of subfolders — safe to re-run any time
 - Fast: multithreaded scanning, live progress with ETA
 
-## 🚀 Easiest way (Windows, no install)
+## 🚀 Easiest way: download from Releases
 
-1. Go to the [**Releases**](../../releases) page
-2. Download `PhotoOrganizerV33.exe`
-3. Double-click it — that's the whole install
+Go to the [**Releases**](../../releases) page and grab the file for your computer:
 
-> Windows SmartScreen may warn about an unknown publisher the first time.
+| Your computer | Download | Then |
+|---|---|---|
+| **Windows** | `PhotoOrganizer-Windows.exe` | Double-click it |
+| **Mac** | `PhotoOrganizer-macOS.zip` | Unzip, then **right-click → Open** (see below) |
+
+> **Windows**: SmartScreen may warn about an unknown publisher the first time.
 > Click **More info → Run anyway**.
+>
+> **Mac**: the app isn't signed with an Apple developer certificate, so the
+> first launch must be **right-click (or Ctrl-click) the app → Open → Open**.
+> Double-clicking will just show a warning. You only need to do this once.
+> If macOS still refuses, open Terminal and run:
+> `xattr -cr ~/Downloads/PhotoOrganizer.app`
 
 ## 🐍 Running from source (Windows/Mac/Linux)
 
-Requires [Python 3.10+](https://www.python.org/downloads/).
+Requires [Python 3.10+](https://www.python.org/downloads/) — on Mac, install it
+from that link (the python.org installer includes everything needed).
 
 ```bash
 git clone https://github.com/USERNAME/kjeglas-photo-organizer.git
 cd kjeglas-photo-organizer
-pip install -r requirements.txt
-python photo_organizer.py
+pip3 install -r requirements.txt
+python3 photo_organizer.py
 ```
 
 ## 🛟 How to use it safely
