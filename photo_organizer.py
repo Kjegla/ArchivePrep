@@ -1,8 +1,16 @@
 #!/usr/bin/env python3
 """
-Kjegla's Photo Organizer by Camera Model - Customized Edition (v33)
+Kjegla's Photo Organizer by Camera Model - Customized Edition (v34)
 Safely organizes photos into folders based on camera model metadata.
 Can either MOVE or COPY files with date-based subfolders.
+
+v34 changes:
+- Preview results are cached: Execute right after a Preview replays the
+  previewed plan directly, skipping the whole re-analysis (metadata reads,
+  duplicate hashing). The cache is validated against a folder fingerprint
+  (every file's path/size/mtime) and the current settings - if anything
+  changed since the preview, Execute automatically falls back to a fresh
+  full analysis, so a stale plan can never run.
 
 v33 changes:
 - Real HEIC support via pillow-heif (exact iPhone model + EXIF dates)
@@ -17,6 +25,7 @@ v33 changes:
 """
 
 import os
+import copy
 import json
 import time
 import shutil
@@ -415,6 +424,47 @@ def read_media_metadata(file_path):
     return read_metadata(file_path)
 
 
+def collect_media_files(source_path, include_subfolders):
+    """List media files in the source. Shared by the organizer and the
+    preview-cache validation so both always see the same file set.
+
+    Returns (regular_media_files, raw_files).
+    """
+    if include_subfolders:
+        all_files = [Path(dirpath) / name
+                     for dirpath, _dirs, names in os.walk(source_path)
+                     for name in names]
+    else:
+        all_files = [f for f in source_path.iterdir() if f.is_file()]
+    # Never touch our own log/undo files
+    all_files = [f for f in all_files if not f.name.startswith('kjegla_')]
+    raw_files = [f for f in all_files if f.suffix.lower() in RAW_EXTS]
+    regular = [f for f in all_files
+               if f.suffix.lower() in (IMAGE_EXTS | VIDEO_EXTS)]
+    return regular, raw_files
+
+
+def plan_key(settings):
+    """Settings that affect where files go. If any of these differ between
+    preview and execute, the cached plan is invalid."""
+    return (settings.source, settings.operation, settings.subfolder_mode,
+            settings.separate_raw, settings.separate_screenshots,
+            settings.include_subfolders)
+
+
+def folder_fingerprint(media_files):
+    """Cheap folder-state snapshot: path -> (size, mtime). Detects any
+    added/removed/modified file without reading file contents."""
+    fp = {}
+    for f in media_files:
+        try:
+            st = f.stat()
+            fp[str(f)] = (st.st_size, st.st_mtime_ns)
+        except OSError:
+            fp[str(f)] = None
+    return fp
+
+
 class PhotoOrganizerGUI:
     def __init__(self, root):
         self.root = root
@@ -438,6 +488,7 @@ class PhotoOrganizerGUI:
         self.processing = False
         self.cancel_requested = False
         self.last_undo_file = None
+        self.cached_plan = None  # preview results reusable by Execute
         self.queue = queue.Queue()
 
         self.max_threads = min(multiprocessing.cpu_count(), 12)
@@ -892,26 +943,19 @@ class PhotoOrganizerGUI:
         self.log("=" * 60)
 
         try:
-            if settings.include_subfolders:
-                all_files = [Path(dirpath) / name
-                             for dirpath, _dirs, names in os.walk(source_path)
-                             for name in names]
-            else:
-                all_files = [f for f in source_path.iterdir() if f.is_file()]
+            regular_media_files, raw_files = collect_media_files(
+                source_path, settings.include_subfolders)
         except OSError as e:
             self.log(f"❌ Could not read source folder: {e}")
             self.update_status("Error reading source folder")
             return
 
-        # Never touch our own log/undo files
-        all_files = [f for f in all_files if not f.name.startswith('kjegla_')]
-
-        raw_files = [f for f in all_files if f.suffix.lower() in RAW_EXTS]
-        regular_media_files = [f for f in all_files
-                               if f.suffix.lower() in (IMAGE_EXTS | VIDEO_EXTS)]
-
         # Process regular files first so RAW/video matching can use their models
         media_files = regular_media_files + raw_files
+
+        # Snapshot the folder state now; a dry run stores this so Execute can
+        # later prove nothing changed since the preview
+        fingerprint = folder_fingerprint(media_files) if dry_run else None
 
         self.stats['total_files'] = len(media_files)
 
@@ -947,9 +991,10 @@ class PhotoOrganizerGUI:
         undo_path = source_path / f"kjegla_undo_{run_stamp}.json"
 
         # Per-run context: planned targets make dry-run duplicate renames
-        # accurate; undo_entries and moved_from feed undo / folder cleanup
+        # accurate; undo_entries and moved_from feed undo / folder cleanup;
+        # plan_ops collects [source, target] pairs for the preview cache
         ctx = SimpleNamespace(planned_targets=set(), undo_entries=[],
-                              moved_from=set())
+                              moved_from=set(), plan_ops=[])
 
         with open(log_path, 'w', encoding='utf-8') as log_file:
             log_file.write(f"Kjegla's Media Organization Log - {datetime.now()}\n")
@@ -1067,8 +1112,18 @@ class PhotoOrganizerGUI:
 
             if dry_run:
                 self.log("\n⚠️  This was a DRY RUN - no files were actually moved/copied!")
+                if not self.cancel_requested:
+                    self.cached_plan = {
+                        'key': plan_key(settings),
+                        'fingerprint': fingerprint,
+                        'ops': ctx.plan_ops,
+                        'stats': copy.deepcopy(self.stats),
+                    }
+                    self.log("⚡ Preview cached - Execute will reuse it "
+                             "without re-scanning (as long as nothing changes).")
                 self.update_status("Dry run complete")
             else:
+                self.cached_plan = None  # the folder just changed
                 self.log(f"\n✅ Operation complete! Files were {operation}d successfully.")
                 if ctx.undo_entries:
                     self.log("↩️ This run can be undone with the 'Undo Last Run' button.")
@@ -1216,10 +1271,153 @@ class PhotoOrganizerGUI:
                 log_file.write(f"  FILE OPERATION ERROR: {e}\n")
                 self.stats['errors'] += 1
         else:
+            ctx.plan_ops.append([str(file_path), str(target_path)])
             relative_path = target_path.relative_to(source_path)
             self.log(f"  🔍 Would {operation} to: {relative_path}")
             log_file.write(f"  Would {operation} to: {relative_path}\n")
             self.stats['processed'] += 1
+
+    def _execute_cached_plan(self, plan, settings):
+        """Execute a cached preview plan without re-analyzing anything.
+
+        Returns True if the plan ran; False if the folder no longer matches
+        the preview fingerprint (caller then runs a fresh full analysis).
+        """
+        source_path = Path(settings.source)
+        start_time = datetime.now()
+
+        self.update_status("Verifying folder is unchanged since preview...")
+        try:
+            regular, raw = collect_media_files(source_path,
+                                               settings.include_subfolders)
+        except OSError as e:
+            self.log(f"❌ Could not read source folder: {e}")
+            return False
+        if folder_fingerprint(regular + raw) != plan['fingerprint']:
+            self.log("⚠️ Folder changed since the preview - "
+                     "running a fresh analysis instead.")
+            return False
+
+        ops = plan['ops']
+        operation = settings.operation
+        operation_text = "Moving" if operation == "move" else "Copying"
+
+        # Start from the preview's statistics; redo the live counters
+        self.stats = copy.deepcopy(plan['stats'])
+        self.stats['processed'] = 0
+        self.stats['errors'] = 0
+
+        run_stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        log_filename = f"kjegla_media_log_{run_stamp}.txt"
+        undo_path = source_path / f"kjegla_undo_{run_stamp}.json"
+
+        self.log("=" * 60)
+        self.log(f"Kjegla's Photo Organizer - {operation_text.upper()} (cached preview)")
+        self.log(f"Source: {source_path}")
+        self.log(f"⚡ Folder unchanged since preview - executing "
+                 f"{len(ops)} planned operation(s) directly")
+        self.log("=" * 60)
+
+        undo_entries = []
+        moved_from = set()
+        total = len(ops)
+        phase_start = time.monotonic()
+        last_status_time = 0.0
+        last_progress = -1
+
+        with open(source_path / log_filename, 'w', encoding='utf-8') as log_file:
+            log_file.write(f"Kjegla's Media Organization Log - {datetime.now()}\n")
+            log_file.write(f"Source Folder: {source_path}\n")
+            log_file.write(f"Mode: {operation.upper()} (cached preview replay)\n")
+            log_file.write("=" * 60 + "\n\n")
+
+            for idx, (src, dst) in enumerate(ops):
+                if self.cancel_requested:
+                    self.log("\n⏹️ Operation cancelled by user")
+                    break
+
+                progress = int((idx + 1) / total * 100) if total else 100
+                if progress != last_progress:
+                    self.update_progress(progress)
+                    last_progress = progress
+                now = time.monotonic()
+                if now - last_status_time >= 0.2 or idx + 1 == total:
+                    elapsed = now - phase_start
+                    rate = (idx + 1) / elapsed if elapsed > 0 else 0
+                    if rate > 0.01 and idx + 1 < total:
+                        remaining = (total - idx - 1) / rate
+                        eta = f"{int(remaining // 60)}:{int(remaining % 60):02d}"
+                    else:
+                        eta = "--:--"
+                    self.update_status(
+                        f"Processing {idx + 1}/{total} • {rate:.0f} files/s "
+                        f"• ETA {eta} • errors {self.stats['errors']}")
+                    last_status_time = now
+
+                src_p, dst_p = Path(src), Path(dst)
+                try:
+                    if not src_p.exists():
+                        raise FileNotFoundError("source file vanished")
+                    # The fingerprint doesn't cover target folders on flat
+                    # scans, so re-check the landing spot and dodge if taken
+                    if dst_p.exists():
+                        base = dst_p
+                        counter = 1
+                        while dst_p.exists():
+                            dst_p = base.parent / f"{base.stem}_{counter}{base.suffix}"
+                            counter += 1
+                        self.log(f"  🔄 {base.name}: destination taken, "
+                                 f"renaming to {dst_p.name}")
+                    dst_p.parent.mkdir(parents=True, exist_ok=True)
+                    if operation == "move":
+                        shutil.move(str(src_p), str(dst_p))
+                        moved_from.add(src_p.parent)
+                    else:
+                        shutil.copy2(str(src_p), str(dst_p))
+                    undo_entries.append([str(dst_p), str(src_p)])
+                    relative = dst_p.relative_to(source_path)
+                    self.log(f"  ✅ {operation_text}: {src_p.name} → {relative}")
+                    log_file.write(f"{operation_text}: {src} -> {dst_p}\n")
+                    self.stats['processed'] += 1
+                except Exception as e:
+                    self.log(f"  ❌ {src_p.name}: {e}")
+                    log_file.write(f"ERROR {src}: {e}\n")
+                    self.stats['errors'] += 1
+
+                # Flush the undo record periodically so a crash can't lose it
+                if undo_entries and (idx + 1) % 50 == 0:
+                    self._write_undo(undo_path, operation, source_path,
+                                     undo_entries)
+
+            if undo_entries:
+                self._write_undo(undo_path, operation, source_path, undo_entries)
+                self.queue.put(("undo_available", str(undo_path), None))
+
+            if operation == "move" and settings.include_subfolders:
+                removed = self._remove_empty_dirs(moved_from, source_path)
+                if removed:
+                    self.log(f"\n🧹 Removed {removed} empty folder(s)")
+
+            duration = (datetime.now() - start_time).total_seconds()
+            self.stats['duration_seconds'] = duration
+
+            self.log("\n" + "=" * 60)
+            self.log("SUMMARY:")
+            self.log(f"Files processed: {self.stats['processed']}")
+            self.log(f"Errors: {self.stats['errors']}")
+            self.log(f"Duration: {duration:.1f} seconds "
+                     f"(analysis skipped - cached preview)")
+            log_file.write(f"\nSUMMARY: processed {self.stats['processed']}, "
+                           f"errors {self.stats['errors']}, {duration:.1f}s\n")
+            self.log(f"\n📄 Log file saved: {log_filename}")
+            self.log(f"\n✅ Operation complete! Files were {operation}d successfully.")
+            if undo_entries:
+                self.log("↩️ This run can be undone with the 'Undo Last Run' button.")
+            self.update_status(
+                f"Operation complete - {self.stats['processed']} files {operation}d")
+
+        self.cached_plan = None
+        return True
 
     def _validate_source(self):
         """Validate the source folder on the main thread. Returns Path or None."""
@@ -1232,7 +1430,7 @@ class PhotoOrganizerGUI:
             return None
         return source_path
 
-    def _start_worker(self, dry_run):
+    def _start_worker(self, dry_run, use_cache=False):
         """Snapshot settings and launch the processing thread."""
         settings = self._snapshot_settings()
         self.processing = True
@@ -1241,7 +1439,13 @@ class PhotoOrganizerGUI:
 
         def run():
             try:
-                self.organize_photos(settings, dry_run=dry_run)
+                ran = False
+                if use_cache and not dry_run:
+                    plan = self.cached_plan
+                    if plan and plan['key'] == plan_key(settings):
+                        ran = self._execute_cached_plan(plan, settings)
+                if not ran:
+                    self.organize_photos(settings, dry_run=dry_run)
             except Exception as e:
                 self.log(f"\n❌ Unexpected error: {e}")
             finally:
@@ -1268,6 +1472,10 @@ class PhotoOrganizerGUI:
             return
 
         operation = self.operation_mode.get()
+        cache_ready = (self.cached_plan is not None and
+                       self.cached_plan['key'] == plan_key(self._snapshot_settings()))
+        cache_note = ("\n\n⚡ Your preview will be reused - no re-scan needed "
+                      "(unless the folder changed since then)." if cache_ready else "")
         result = messagebox.askyesno(
             "Confirm Operation",
             f"Are you sure you want to {operation} files?\n\n"
@@ -1277,11 +1485,12 @@ class PhotoOrganizerGUI:
             f"Separate RAW files: {'Yes' if self.separate_raw.get() else 'No'}\n"
             f"Separate Screenshots: {'Yes' if self.separate_screenshots.get() else 'No'}\n"
             f"Include subfolders: {'Yes' if self.include_subfolders.get() else 'No'}\n\n"
-            f"{'Files will be MOVED from source!' if operation == 'move' else 'Original files will remain untouched.'}")
+            f"{'Files will be MOVED from source!' if operation == 'move' else 'Original files will remain untouched.'}"
+            f"{cache_note}")
 
         if not result:
             return
-        self._start_worker(dry_run=False)
+        self._start_worker(dry_run=False, use_cache=True)
 
     def undo_last_operation(self):
         """Undo the most recent execute run (main thread entry point)."""
@@ -1383,6 +1592,7 @@ class PhotoOrganizerGUI:
         except OSError:
             pass
         self.last_undo_file = None
+        self.cached_plan = None  # the folder just changed
 
         verb = "restored" if op == "move" else "removed"
         self.log(f"\n✅ Undo complete: {restored} files {verb}, "
@@ -1413,7 +1623,7 @@ To create an executable:
    pip install Pillow pillow-heif sv-ttk pyinstaller
 
 2. Create the executable:
-   python -m PyInstaller --onefile --windowed --noconfirm --collect-all sv_ttk --name "PhotoOrganizerV33" photo_organizer_v33.py
+   python -m PyInstaller --onefile --windowed --noconfirm --collect-all sv_ttk --name "PhotoOrganizerV34" photo_organizer_v34.py
 
 3. Optional: Add VLC cone icon (download vlc_cone.ico):
    add --icon=vlc_cone.ico to the command above
