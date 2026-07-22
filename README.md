@@ -1,4 +1,4 @@
-# 📷 Kjegla's Photo Organizer
+# Kjegla's Photo Organizer
 
 Sorts a messy folder of photos and videos into tidy folders by **camera model**
 (e.g. `Sony A6000`, `iPhone 16 Pro`, `Samsung Galaxy S24 Ultra`), with optional
@@ -11,7 +11,7 @@ My Photos\
 └── Samsung Galaxy S24 Ultra\2024\06-June\20240610_101512.jpg
 ```
 
-## ✨ Features
+## Features
 
 - **Move or Copy** — copy mode never touches your originals
 - **Preview (dry run)** — see exactly what would happen before doing it
@@ -25,7 +25,7 @@ My Photos\
 - Optional recursive scan of subfolders — safe to re-run any time
 - Fast: multithreaded scanning, live progress with ETA
 
-## 🚀 Easiest way (Windows, no install)
+## Easiest way (Windows, no install)
 
 1. Go to the [**Releases**](../../releases) page
 2. Download `PhotoOrganizerV33.exe`
@@ -34,7 +34,7 @@ My Photos\
 > Windows SmartScreen may warn about an unknown publisher the first time.
 > Click **More info → Run anyway**.
 
-## 🐍 Running from source (Windows/Mac/Linux)
+## Running from source (Windows/Mac/Linux)
 
 Requires [Python 3.10+](https://www.python.org/downloads/).
 
@@ -45,7 +45,7 @@ pip install -r requirements.txt
 python photo_organizer.py
 ```
 
-## 🛟 How to use it safely
+## How to use it safely
 
 1. Pick your photo folder with **Browse...**
 2. Choose **Copy** mode the first time (originals stay untouched)
