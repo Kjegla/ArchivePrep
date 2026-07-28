@@ -443,6 +443,40 @@ def files_identical(a, b):
         return False
 
 
+def _same_volume(a, b):
+    """True if two paths sit on the same filesystem, so a move is a rename."""
+    try:
+        return a.stat().st_dev == b.stat().st_dev
+    except OSError:
+        return False  # unknown - take the careful path
+
+
+def transfer_file(src, dst, operation):
+    """Move or copy a file, proving the bytes actually arrived.
+
+    A move within one volume is a rename: instant, atomic, and there is
+    nothing to check. Anything else physically copies the data - and a move
+    would then delete the original - so the copy is checked *before* that
+    happens. A short write that never raised an error (a full disk, a
+    network drive that dropped out) would otherwise quietly destroy the only
+    copy of a photo. One extra stat is a cheap price for closing that.
+
+    Raises OSError if the destination did not receive every byte.
+    """
+    size = src.stat().st_size
+    if operation == "move" and _same_volume(src, dst.parent):
+        shutil.move(str(src), str(dst))
+        return
+
+    shutil.copy2(str(src), str(dst))
+    arrived = dst.stat().st_size
+    if arrived != size:
+        raise OSError(f"only {arrived} of {size} bytes arrived - the "
+                      f"destination may be full or disconnected")
+    if operation == "move":
+        os.remove(str(src))
+
+
 # Head-hash size for the cheap middle stage of duplicate detection
 HEAD_HASH_BYTES = 64 * 1024
 
@@ -1347,11 +1381,17 @@ class PhotoOrganizerGUI:
         folder = filedialog.askdirectory(title="Select Source Folder")
         if folder:
             self.source_folder.set(folder)
-            # Offer undo if the folder holds a not-yet-undone record
-            undo_files = sorted(Path(folder).glob("kjegla_undo_*.json"))
+            # Offer undo if the folder holds a not-yet-undone record. Both
+            # patterns are checked so a run made with v35 or earlier, whose
+            # record is a single .json object, can still be undone.
+            undo_files = sorted(list(Path(folder).glob("kjegla_undo_*.jsonl"))
+                                + list(Path(folder).glob("kjegla_undo_*.json")))
             self.last_undo_file = str(undo_files[-1]) if undo_files else None
-            rename_undos = sorted((Path(folder) / WRONG_EXT_FOLDER)
-                                  .glob("kjegla_undo_renames_*.json"))
+            rename_undos = sorted(
+                list((Path(folder) / WRONG_EXT_FOLDER)
+                     .glob("kjegla_undo_renames_*.jsonl"))
+                + list((Path(folder) / WRONG_EXT_FOLDER)
+                       .glob("kjegla_undo_renames_*.json")))
             self.last_rename_undo_file = (str(rename_undos[-1])
                                           if rename_undos else None)
             if not self.processing:
@@ -1878,15 +1918,20 @@ class PhotoOrganizerGUI:
         run_stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         log_filename = f"kjegla_media_log_{run_stamp}.txt"
         log_path = source_path / log_filename
-        undo_path = source_path / f"kjegla_undo_{run_stamp}.json"
+        undo_path = source_path / f"kjegla_undo_{run_stamp}.jsonl"
 
         # Per-run context: planned targets make dry-run duplicate renames
         # accurate; undo_entries feeds undo; plan_ops collects [source, target]
         # pairs for the preview cache; duplicate_of/health carry the results of
-        # the two analysis phases into the per-file loop
+        # the two analysis phases into the per-file loop; undo_path is the
+        # journal each move is appended to as it happens
         ctx = SimpleNamespace(planned_targets=set(), undo_entries=[],
                               plan_ops=[], duplicate_of=duplicate_of,
-                              health=health, rename_entries=[])
+                              health=health, rename_entries=[],
+                              undo_path=undo_path)
+
+        if not dry_run:
+            self._journal_start(undo_path, operation, source_path)
 
         if duplicate_groups:
             report_name = f"kjegla_duplicates_{run_stamp}.txt"
@@ -1945,29 +1990,26 @@ class PhotoOrganizerGUI:
                     log_file.write(f"ERROR processing {file_path.name}: {e}\n")
                     self.stats['errors'] += 1
 
-                # Flush the undo record periodically so a crash can't lose it
-                if not dry_run and ctx.undo_entries and (idx + 1) % 50 == 0:
-                    self._write_undo(undo_path, operation, source_path,
-                                     ctx.undo_entries)
-
             # Summary
             duration = (datetime.now() - start_time).total_seconds()
             self.stats['duration_seconds'] = duration
 
-            # Finalize the undo record
-            if not dry_run and ctx.undo_entries:
-                self._write_undo(undo_path, operation, source_path,
-                                 ctx.undo_entries)
-                self.queue.put(("undo_available", str(undo_path), None))
+            # Every move was journalled as it happened, so there is nothing
+            # left to write - only an empty journal to clear away.
+            if not dry_run:
+                if ctx.undo_entries:
+                    self.queue.put(("undo_available", str(undo_path), None))
+                else:
+                    undo_path.unlink(missing_ok=True)
 
             # Renames get their own undo record, kept inside the folder they
             # affect, so they can be reversed without unpicking the whole run
             if not dry_run and ctx.rename_entries:
                 rename_undo = (source_path / WRONG_EXT_FOLDER /
-                               f"kjegla_undo_renames_{run_stamp}.json")
-                rename_undo.parent.mkdir(parents=True, exist_ok=True)
-                self._write_undo(rename_undo, "move", source_path,
-                                 ctx.rename_entries)
+                               f"kjegla_undo_renames_{run_stamp}.jsonl")
+                self._journal_start(rename_undo, "move", source_path)
+                for entry in ctx.rename_entries:
+                    self._journal_append(rename_undo, entry)
                 self.queue.put(("rename_undo_available", str(rename_undo), None))
                 self.log(f"\n↩️ {len(ctx.rename_entries)} rename(s) can be "
                          f"undone on their own with 'Undo Renames'.")
@@ -2061,16 +2103,77 @@ class PhotoOrganizerGUI:
                 self.update_status(f"Operation complete - {self.stats['processed']} files {operation}d")
 
     @staticmethod
-    def _write_undo(undo_path, operation, source_path, entries):
-        """Persist the undo record (list of [target, original] pairs)."""
+    def _journal_start(undo_path, operation, source_path):
+        """Open an undo journal and write its header line.
+
+        The journal is one line of JSON per record: a header, then one
+        [target, original] pair for every file touched. Nothing already
+        written is ever rewritten.
+
+        That is the whole point. The previous version rebuilt the entire
+        record from scratch every 50 files, so a crash or a power cut
+        during one of those rewrites left truncated JSON behind - and a
+        truncated undo record cannot be read at all, which made the whole
+        run impossible to reverse. An undo record failing is the one
+        failure this application cannot afford.
+        """
         try:
+            undo_path.parent.mkdir(parents=True, exist_ok=True)
             with open(undo_path, 'w', encoding='utf-8') as f:
                 json.dump({'operation': operation,
                            'created': datetime.now().isoformat(),
-                           'source': str(source_path),
-                           'entries': entries}, f)
+                           'source': str(source_path)}, f)
+                f.write("\n")
         except OSError:
             pass
+
+    @staticmethod
+    def _journal_append(undo_path, entry):
+        """Record one [target, original] pair, before moving on to the next.
+
+        Opened and closed per entry so a crashed process cannot take any
+        entry down with it - by the time this returns the bytes are with the
+        operating system. That costs one file open per file organized, which
+        is nothing next to the copy or move it is recording.
+        """
+        try:
+            with open(undo_path, 'a', encoding='utf-8') as f:
+                json.dump(entry, f)
+                f.write("\n")
+        except OSError:
+            pass
+
+    @staticmethod
+    def _read_undo(undo_path):
+        """Read an undo record back. Returns {'operation', 'source', 'entries'}.
+
+        Reads the journal written by this version, and still reads the single
+        JSON object that v35 and earlier wrote, so a folder organized with an
+        older build can always be undone.
+
+        A torn final line - the only damage an interrupted append can cause -
+        is dropped, and everything before it is still restored.
+        """
+        text = Path(undo_path).read_text(encoding='utf-8')
+        try:
+            record = json.loads(text)  # v35 and earlier: one object, whole file
+            record.setdefault('entries', [])
+            return record
+        except json.JSONDecodeError:
+            pass
+
+        lines = text.splitlines()
+        if not lines:
+            return {'operation': 'move', 'entries': []}
+        record = json.loads(lines[0])
+        entries = []
+        for line in lines[1:]:
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                break  # a half-written last line: stop, keep everything before it
+        record['entries'] = entries
+        return record
 
     @staticmethod
     def _sweep_empty_dirs(source_root, log_file=None):
@@ -2154,8 +2257,9 @@ class PhotoOrganizerGUI:
 
         target.parent.mkdir(parents=True, exist_ok=True)
         try:
-            shutil.move(str(file_path), str(target))
+            transfer_file(file_path, target, "move")
             ctx.undo_entries.append([str(target), str(file_path)])
+            self._journal_append(ctx.undo_path, [str(target), str(file_path)])
             if folder_name == WRONG_EXT_FOLDER:
                 # These also get their own undo record, so the renames can be
                 # reversed on their own without touching the rest of the run
@@ -2303,12 +2407,10 @@ class PhotoOrganizerGUI:
         if not dry_run:
             target_folder.mkdir(parents=True, exist_ok=True)
             try:
-                if operation == "move":
-                    shutil.move(str(file_path), str(target_path))
-                else:  # copy
-                    shutil.copy2(str(file_path), str(target_path))
-
+                transfer_file(file_path, target_path, operation)
                 ctx.undo_entries.append([str(target_path), str(file_path)])
+                self._journal_append(ctx.undo_path,
+                                     [str(target_path), str(file_path)])
                 relative_path = target_path.relative_to(source_path)
                 self.log(f"  ✅ {operation_text} to: {relative_path}")
                 log_file.write(f"  {operation_text} to: {relative_path}\n")
@@ -2357,7 +2459,8 @@ class PhotoOrganizerGUI:
 
         run_stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         log_filename = f"kjegla_media_log_{run_stamp}.txt"
-        undo_path = source_path / f"kjegla_undo_{run_stamp}.json"
+        undo_path = source_path / f"kjegla_undo_{run_stamp}.jsonl"
+        self._journal_start(undo_path, operation, source_path)
 
         self.log("=" * 60)
         self.log(f"Kjegla's Photo Organizer - {operation_text.upper()} (cached preview)")
@@ -2416,11 +2519,9 @@ class PhotoOrganizerGUI:
                         self.log(f"  🔄 {base.name}: destination taken, "
                                  f"renaming to {dst_p.name}")
                     dst_p.parent.mkdir(parents=True, exist_ok=True)
-                    if operation == "move":
-                        shutil.move(str(src_p), str(dst_p))
-                    else:
-                        shutil.copy2(str(src_p), str(dst_p))
+                    transfer_file(src_p, dst_p, operation)
                     undo_entries.append([str(dst_p), str(src_p)])
+                    self._journal_append(undo_path, [str(dst_p), str(src_p)])
                     relative = dst_p.relative_to(source_path)
                     self.log(f"  ✅ {operation_text}: {src_p.name} → {relative}")
                     log_file.write(f"{operation_text}: {src} -> {dst_p}\n")
@@ -2430,14 +2531,10 @@ class PhotoOrganizerGUI:
                     log_file.write(f"ERROR {src}: {e}\n")
                     self.stats['errors'] += 1
 
-                # Flush the undo record periodically so a crash can't lose it
-                if undo_entries and (idx + 1) % 50 == 0:
-                    self._write_undo(undo_path, operation, source_path,
-                                     undo_entries)
-
             if undo_entries:
-                self._write_undo(undo_path, operation, source_path, undo_entries)
                 self.queue.put(("undo_available", str(undo_path), None))
+            else:
+                undo_path.unlink(missing_ok=True)
 
             if operation == "move" and settings.cleanup_empty:
                 removed = self._sweep_empty_dirs(source_path, log_file)
@@ -2710,8 +2807,7 @@ class PhotoOrganizerGUI:
             return
 
         try:
-            with open(undo_file, 'r', encoding='utf-8') as f:
-                record = json.load(f)
+            record = self._read_undo(undo_file)
         except (OSError, json.JSONDecodeError) as e:
             messagebox.showerror("Undo Renames",
                                  f"Could not read the rename record:\n{e}")
@@ -2757,8 +2853,7 @@ class PhotoOrganizerGUI:
             return
 
         try:
-            with open(undo_file, 'r', encoding='utf-8') as f:
-                record = json.load(f)
+            record = self._read_undo(undo_file)
         except (OSError, json.JSONDecodeError) as e:
             messagebox.showerror("Undo", f"Could not read undo record:\n{e}")
             return
@@ -2811,21 +2906,37 @@ class PhotoOrganizerGUI:
             if self.cancel_requested:
                 self.log("\n⏹️ Undo cancelled by user")
                 break
-            target_p = Path(target)
+            target_p, original_p = Path(target), Path(original)
             try:
                 if op == "move":
                     if not target_p.exists():
                         self.log(f"  ⚠️ Missing, cannot restore: {target}")
                         problems += 1
-                    elif Path(original).exists():
+                    elif original_p.exists():
                         self.log(f"  ⚠️ Original location occupied, skipping: {original}")
                         problems += 1
                     else:
-                        Path(original).parent.mkdir(parents=True, exist_ok=True)
-                        shutil.move(str(target_p), original)
+                        original_p.parent.mkdir(parents=True, exist_ok=True)
+                        transfer_file(target_p, original_p, "move")
                         restored += 1
-                else:  # copy run: delete the created copies
-                    if target_p.exists():
+                else:
+                    # Copy run: delete the copies this run made - but only
+                    # once we can prove a file still *is* one of them. The
+                    # original it was copied from is untouched by a copy run,
+                    # so if the two no longer match byte for byte, someone has
+                    # edited or replaced the copy since. Deleting that would
+                    # destroy work, which undo must never do.
+                    if not target_p.exists():
+                        pass  # already gone; nothing to undo
+                    elif not original_p.exists():
+                        self.log(f"  ⚠️ The original is gone, so this copy is "
+                                 f"now the only one - keeping it: {target}")
+                        problems += 1
+                    elif not files_identical(target_p, original_p):
+                        self.log(f"  ⚠️ Changed since it was copied - keeping "
+                                 f"it: {target}")
+                        problems += 1
+                    else:
                         os.remove(str(target_p))
                         restored += 1
             except Exception as e:

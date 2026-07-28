@@ -192,7 +192,7 @@ expected = [
 for e in expected:
     check(e in files, f"created {e}")
 check((SCRATCH / "cam1.jpg").exists(), "copy keeps originals")
-undo_files = list(SCRATCH.glob("kjegla_undo_*.json"))
+undo_files = list(SCRATCH.glob("kjegla_undo_*.jsonl"))
 check(len(undo_files) == 1, f"undo record written (got {len(undo_files)})")
 
 print("=== Test 3: identical duplicates are skipped, changed files renamed ===")
@@ -218,11 +218,11 @@ check(stats['processed'] == TOTAL, f"move processed {TOTAL} (got {stats['process
 check(stats['errors'] == 0, f"move errors 0 (got {stats['errors']})")
 
 print("=== Test 5: undo restores the move run ===")
-undo_files = sorted(SCRATCH.glob("kjegla_undo_*.json"))
+undo_files = sorted(SCRATCH.glob("kjegla_undo_*.jsonl"))
 check(len(undo_files) == 1, "one undo record present")
 import json as _json
 import tkinter as tk
-record = _json.loads(undo_files[0].read_text(encoding='utf-8'))
+record = po.PhotoOrganizerGUI._read_undo(undo_files[0])
 check(record['operation'] == 'move', "undo record has operation=move")
 check(len(record['entries']) == TOTAL, f"undo record has {TOTAL} entries")
 root = tk.Tk(); root.withdraw()
@@ -234,7 +234,7 @@ top_media = sorted(p.name for p in SCRATCH.iterdir()
 check(len(top_media) == TOTAL, f"all {TOTAL} files restored to top level (got {len(top_media)})")
 check(not (SCRATCH / "Samsung Galaxy S23 Ultra").exists(), "camera folder cleaned up")
 check(not (SCRATCH / "Unknown Camera").exists(), "Unknown Camera folder cleaned up")
-check(list(SCRATCH.glob("kjegla_undo_*.json")) == [], "undo record consumed")
+check(list(SCRATCH.glob("kjegla_undo_*.jsonl")) == [], "undo record consumed")
 check(len(list(SCRATCH.glob("kjegla_undo_*.undone"))) == 1, "undo record renamed .undone")
 
 print("=== Test 6: recursive scan + idempotent re-run + empty dir cleanup ===")
@@ -315,7 +315,7 @@ check("iPhone 14 Pro/2023/12-December/real_iphone.heic" in files, "replay: HEIC 
 top_media = [p for p in SCRATCH.iterdir()
              if p.is_file() and p.suffix.lower() in po.ALL_MEDIA_EXTS]
 check(top_media == [], "replay: source top level emptied (move)")
-check(len(list(SCRATCH.glob("kjegla_undo_*.json"))) == 1, "replay wrote an undo record")
+check(len(list(SCRATCH.glob("kjegla_undo_*.jsonl"))) == 1, "replay wrote an undo record")
 root.destroy()
 
 print("=== Test 10: cache invalidation ===")
@@ -630,11 +630,11 @@ check(not any(f.startswith("Corrupt/vids/IMG_0607") for f in files),
       "the misnamed file was NOT called damaged")
 
 # the renames get their own undo record, kept inside the folder they affect
-rename_records = list((SCRATCH / "Wrong Extension").glob("kjegla_undo_renames_*.json"))
+rename_records = list((SCRATCH / "Wrong Extension").glob("kjegla_undo_renames_*.jsonl"))
 check(len(rename_records) == 1,
       f"a separate rename undo record was written inside Wrong Extension/ "
       f"(got {len(rename_records)})")
-rec = _json.loads(rename_records[0].read_text(encoding='utf-8'))
+rec = po.PhotoOrganizerGUI._read_undo(rename_records[0])
 check(len(rec['entries']) == 1, "the rename record covers the 1 rename")
 check(rec['entries'][0][1].endswith("IMG_0607.MOV"),
       "...and remembers the original name")
@@ -717,9 +717,9 @@ files = relpaths()
 check("Duplicates/src/IMG_1 (1).jpg" in files,
       f"duplicate mirrored its source folder (got {files})")
 check("Corrupt/src/broken.jpg" in files, "damaged file mirrored its source folder")
-undo_files = sorted(SCRATCH.glob("kjegla_undo_*.json"))
+undo_files = sorted(SCRATCH.glob("kjegla_undo_*.jsonl"))
 check(len(undo_files) == 1, "undo record written")
-record = _json.loads(undo_files[0].read_text(encoding='utf-8'))
+record = po.PhotoOrganizerGUI._read_undo(undo_files[0])
 check(len(record['entries']) == 3,
       f"undo record covers all 3 moves incl. set-aside ones (got {len(record['entries'])})")
 root = tk.Tk(); root.withdraw()
@@ -855,6 +855,130 @@ files = relpaths()
 check(stats['damaged'] == 1, f"thorough run flags the 1 bad file (got {stats['damaged']})")
 check("Corrupt/bad.jpg" in files, f"bad file set aside (got {files})")
 check(stats['errors'] == 0, "thorough run had no errors")
+
+print("=== Test 26: the undo journal is append-only and survives a torn tail ===")
+build_source()
+run_app(dry_run=False, operation="move")
+journals = sorted(SCRATCH.glob("kjegla_undo_*.jsonl"))
+check(len(journals) == 1, f"a journal was written (got {len(journals)})")
+lines = journals[0].read_text(encoding='utf-8').splitlines()
+check(_json.loads(lines[0]).get('operation') == 'move',
+      "the first line is the header")
+entries = [_json.loads(line) for line in lines[1:]]
+check(all(isinstance(e, list) and len(e) == 2 for e in entries),
+      "every later line is one [target, original] pair")
+check(len(entries) == TOTAL,
+      f"one line per file moved, written as it happened (got {len(entries)})")
+
+# Simulate a crash part-way through an append: chop the final line in half.
+# The old whole-file rewrite would have left unreadable JSON here, taking the
+# entire run's undo with it.
+text = journals[0].read_text(encoding='utf-8')
+cut = text.rstrip("\n").rfind("\n")
+journals[0].write_text(text[:cut + 1] + '["half a writ', encoding='utf-8')
+record = po.PhotoOrganizerGUI._read_undo(journals[0])
+check(record['operation'] == 'move', "the header still reads after a torn tail")
+check(len(record['entries']) == TOTAL - 1,
+      f"the torn line is dropped and everything before it survives "
+      f"(got {len(record['entries'])})")
+root = tk.Tk(); root.withdraw()
+app = po.PhotoOrganizerGUI(root)
+app._run_undo(journals[0], record)
+root.destroy()
+restored = [p for p in SCRATCH.iterdir()
+            if p.is_file() and p.suffix.lower() in po.ALL_MEDIA_EXTS]
+check(len(restored) == TOTAL - 1,
+      f"undo restored every file the journal still held (got {len(restored)})")
+
+print("=== Test 27: an undo record from v35 or earlier can still be undone ===")
+if SCRATCH.exists():
+    shutil.rmtree(SCRATCH)
+SCRATCH.mkdir(parents=True)
+(SCRATCH / "Old Camera").mkdir()
+(SCRATCH / "Old Camera" / "moved.jpg").write_bytes(b"the photo")
+legacy = SCRATCH / "kjegla_undo_20240101_000000.json"
+legacy.write_text(_json.dumps({
+    'operation': 'move',
+    'created': '2024-01-01T00:00:00',
+    'source': str(SCRATCH),
+    'entries': [[str(SCRATCH / "Old Camera" / "moved.jpg"),
+                 str(SCRATCH / "moved.jpg")]]}), encoding='utf-8')
+record = po.PhotoOrganizerGUI._read_undo(legacy)
+check(record['operation'] == 'move', "legacy record: operation read")
+check(len(record['entries']) == 1, "legacy record: entry read")
+root = tk.Tk(); root.withdraw()
+app = po.PhotoOrganizerGUI(root)
+app._run_undo(legacy, record)
+root.destroy()
+check((SCRATCH / "moved.jpg").exists(),
+      "a folder organized with an older build can still be undone")
+check(not (SCRATCH / "Old Camera").exists(), "its emptied folder was swept")
+
+print("=== Test 28: copy-mode undo never deletes a copy that was edited ===")
+if SCRATCH.exists():
+    shutil.rmtree(SCRATCH)
+SCRATCH.mkdir(parents=True)
+make_img(SCRATCH / "keep.jpg", model="SM-S918B", date="2023:05:10 14:30:00")
+make_img(SCRATCH / "edited.jpg", model="SM-S918B", date="2023:05:11 09:00:00",
+         color='green')
+run_app(dry_run=False, operation="copy")
+journals = sorted(SCRATCH.glob("kjegla_undo_*.jsonl"))
+check(len(journals) == 1, "the copy run wrote an undo record")
+record = po.PhotoOrganizerGUI._read_undo(journals[0])
+check(record['operation'] == 'copy', "the record knows it was a copy run")
+by_origin = {Path(o).name: Path(t) for t, o in record['entries']}
+edited_copy, kept_copy = by_origin['edited.jpg'], by_origin['keep.jpg']
+check(edited_copy.exists() and kept_copy.exists(), "both copies were made")
+# The user opens one of the copies and works on it, then changes their mind
+# about the run. Undo must not destroy that work.
+edited_copy.write_bytes(edited_copy.read_bytes() + b"work the user did")
+root = tk.Tk(); root.withdraw()
+app = po.PhotoOrganizerGUI(root)
+app._run_undo(journals[0], record)
+root.destroy()
+check(edited_copy.exists(),
+      "the edited copy was kept, not deleted")
+check(edited_copy.read_bytes().endswith(b"work the user did"),
+      "...with the user's work still in it")
+check(not kept_copy.exists(), "the untouched copy was removed as normal")
+check((SCRATCH / "keep.jpg").exists() and (SCRATCH / "edited.jpg").exists(),
+      "copy mode left both originals alone throughout")
+
+print("=== Test 29: transfers are verified, and a short write never eats the original ===")
+if SCRATCH.exists():
+    shutil.rmtree(SCRATCH)
+SCRATCH.mkdir(parents=True)
+src = SCRATCH / "src.bin"
+src.write_bytes(b"important photo bytes" * 500)
+po.transfer_file(src, SCRATCH / "copied.bin", "copy")
+check((SCRATCH / "copied.bin").read_bytes() == src.read_bytes(),
+      "copy arrives byte for byte")
+check(src.exists(), "copy leaves the source where it was")
+po.transfer_file(src, SCRATCH / "moved.bin", "move")
+check(not src.exists(), "move removes the source")
+check((SCRATCH / "moved.bin").read_bytes() == (SCRATCH / "copied.bin").read_bytes(),
+      "move arrives byte for byte")
+
+# Force the cross-volume path and make the copy come up short, the way a full
+# disk or a network drive dropping out would. shutil is patched globally here
+# and restored in the finally, so nothing later in the suite is affected.
+victim = SCRATCH / "victim.bin"
+victim.write_bytes(b"the only copy of this photo" * 100)
+real_copy2, real_same_volume = po.shutil.copy2, po._same_volume
+po.shutil.copy2 = lambda s, d: Path(d).write_bytes(Path(s).read_bytes()[:10])
+po._same_volume = lambda a, b: False
+raised = False
+try:
+    try:
+        po.transfer_file(victim, SCRATCH / "landed.bin", "move")
+    except OSError:
+        raised = True
+finally:
+    po.shutil.copy2, po._same_volume = real_copy2, real_same_volume
+check(raised, "a short write is caught and raised rather than passing silently")
+check(victim.exists(), "the original survives a failed move")
+check(victim.stat().st_size == 2700,
+      f"...intact, not half-written (got {victim.stat().st_size} bytes)")
 
 if SCRATCH.exists():
     shutil.rmtree(SCRATCH)
