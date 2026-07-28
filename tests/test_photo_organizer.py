@@ -1,10 +1,16 @@
-"""End-to-end tests for photo_organizer.py, driving the real app headlessly.
+﻿"""End-to-end tests for organizer_core.py - the whole application except the
+window.
 
     python -m pytest tests/ -q
 
-Every test builds real files in a temporary folder and drives the actual
-tkinter app with its window hidden, so what is tested is what ships - not a
-stripped-down copy of the logic.
+Every test builds real files in a temporary folder and runs the real code
+against them, then asserts where each file ended up. Nothing here needs a
+screen: the core takes the same settings object the window builds and reports
+through the same Progress object, so these tests drive exactly what ships.
+
+The one thing they skip - that the window really does build that settings
+object and hand it over - is covered in test_gui_wiring.py, which does open a
+real window.
 
 Each test starts from a clean scratch folder (see conftest.py), so any one of
 them can be run on its own:
@@ -19,16 +25,15 @@ secretly depend on each other.
 The byte-level verdicts of file_health() live in test_golden_corpus.py.
 """
 import json
+import os
 import shutil
-import struct
-import tkinter as tk
 from datetime import datetime
 from pathlib import Path
 
-import photo_organizer as po
-from conftest import (SCRATCH, TOTAL, build_source, check, make_app, make_big_img,
-                      make_img, make_mp4_with_date, relpaths, run_app, run_undo,
-                      truncate)
+import organizer_core as core
+from conftest import (SCRATCH, TOTAL, build_source, check, make_big_img,
+                      make_img, make_mp4_with_date, make_settings, relpaths,
+                      run_app, run_undo, truncate)
 
 
 # ---------------------------------------------------------------------------
@@ -106,7 +111,7 @@ def test_move_then_undo():
     build_source()
     stats = run_app(dry_run=False, operation="move", multithread=False)
     top_media = [p for p in SCRATCH.iterdir()
-                 if p.is_file() and p.suffix.lower() in po.ALL_MEDIA_EXTS]
+                 if p.is_file() and p.suffix.lower() in core.ALL_MEDIA_EXTS]
     check(top_media == [], f"no media left at top level (got {top_media})")
     check(stats['processed'] == TOTAL,
           f"move processed {TOTAL} (got {stats['processed']})")
@@ -114,13 +119,13 @@ def test_move_then_undo():
 
     undo_files = sorted(SCRATCH.glob("kjegla_undo_*.jsonl"))
     check(len(undo_files) == 1, "one undo record present")
-    record = po.PhotoOrganizerGUI._read_undo(undo_files[0])
+    record = core.read_undo(undo_files[0])
     check(record['operation'] == 'move', "undo record has operation=move")
     check(len(record['entries']) == TOTAL, f"undo record has {TOTAL} entries")
 
     run_undo(undo_files[0], record)
     top_media = sorted(p.name for p in SCRATCH.iterdir()
-                       if p.is_file() and p.suffix.lower() in po.ALL_MEDIA_EXTS)
+                       if p.is_file() and p.suffix.lower() in core.ALL_MEDIA_EXTS)
     check(len(top_media) == TOTAL,
           f"all {TOTAL} files restored to top level (got {len(top_media)})")
     check(not (SCRATCH / "Samsung Galaxy S23 Ultra").exists(),
@@ -181,46 +186,46 @@ def test_recursive_duplicate_handling():
 # ---------------------------------------------------------------------------
 
 def test_camera_naming_and_metadata():
-    check(po.friendly_camera_name("SM-S918B") == "Samsung Galaxy S23 Ultra",
+    check(core.friendly_camera_name("SM-S918B") == "Samsung Galaxy S23 Ultra",
           "model mapping S23 Ultra")
-    check(po.friendly_camera_name("iPhone15,2") == "iPhone 14 Pro",
+    check(core.friendly_camera_name("iPhone15,2") == "iPhone 14 Pro",
           "iPhone15,2 -> iPhone 14 Pro")
-    check(po.model_for_image(Path("x.heic"), None) == "iPhone",
+    check(core.model_for_image(Path("x.heic"), None) == "iPhone",
           "unreadable HEIC -> iPhone")
-    check(po.looks_like_screenshot(Path("class_photo.jpg"), None) is False,
+    check(core.looks_like_screenshot(Path("class_photo.jpg"), None) is False,
           "class_photo not screenshot")
-    check(po.looks_like_screenshot(Path("Screenshot_x.png"), None) is True,
+    check(core.looks_like_screenshot(Path("Screenshot_x.png"), None) is True,
           "Screenshot_ prefix detected")
 
     tmp_mp4 = SCRATCH / "unit_test.mp4"
     make_mp4_with_date(tmp_mp4, datetime(2015, 3, 1, 12, 0))
-    d = po.read_video_date(tmp_mp4)
+    d = core.read_video_date(tmp_mp4)
     check(d is not None and d.year == 2015, f"read_video_date parses mvhd (got {d})")
     bad_mp4 = SCRATCH / "bad.mp4"
     bad_mp4.write_bytes(b"not a real mp4 at all")
-    check(po.read_video_date(bad_mp4) is None, "read_video_date safe on garbage")
+    check(core.read_video_date(bad_mp4) is None, "read_video_date safe on garbage")
 
     f1, f2, f3 = SCRATCH / "h1.bin", SCRATCH / "h2.bin", SCRATCH / "h3.bin"
     f1.write_bytes(b"same content")
     f2.write_bytes(b"same content")
     f3.write_bytes(b"other stuff!")
-    check(po.files_identical(f1, f2) is True, "files_identical true for same content")
-    check(po.files_identical(f1, f3) is False,
+    check(core.files_identical(f1, f2) is True, "files_identical true for same content")
+    check(core.files_identical(f1, f3) is False,
           "files_identical false for different content")
-    check(po.HEIF_AVAILABLE, "pillow-heif is active")
+    check(core.HEIF_AVAILABLE, "pillow-heif is active")
 
 
 def test_copy_name_detection():
     for stem in ["IMG_1234 (1)", "IMG_1234 (12)", "IMG_1234(1)", "photo - Copy",
                  "photo - copy", "photo - Copy (2)", "photo copy 2",
                  "photo - kopi", "vacation copy"]:
-        check(po.looks_like_copy_name(stem) is True, f"'{stem}' looks like a copy")
+        check(core.looks_like_copy_name(stem) is True, f"'{stem}' looks like a copy")
     # Camera/phone filenames must NOT be mistaken for copies - a trailing "_2" is
     # how nearly every camera names its files, so it can't be a copy marker.
     for stem in ["IMG_1234", "DSC00001", "DSC-0001", "2023-05-10 vacation", "photo",
                  "IMG_20230510_143000", "photo_2", "photo-3", "photocopy",
                  "Sunset (2 of 3)"]:
-        check(po.looks_like_copy_name(stem) is False,
+        check(core.looks_like_copy_name(stem) is False,
               f"'{stem}' does not look like a copy")
 
 
@@ -229,7 +234,7 @@ def test_keeper_ranking():
     p_good.write_bytes(b"x")
     p_bad = SCRATCH / "b.jpg"
     p_bad.write_bytes(b"x")
-    rank = po.PhotoOrganizerGUI._keeper_rank
+    rank = core._keeper_rank
     health = {p_good: ('ok', ''), p_bad: ('damaged', 'truncated')}
     check(rank(p_good, {}, health) < rank(p_bad, {}, health),
           "a healthy copy always outranks a damaged one")
@@ -252,7 +257,7 @@ def test_empty_folder_sweep():
     (SCRATCH / "keepme" / "notes.txt").write_text("hello")
     (SCRATCH / "junkonly").mkdir()
     (SCRATCH / "junkonly" / "Thumbs.db").write_bytes(b"x")
-    removed = po.PhotoOrganizerGUI._sweep_empty_dirs(SCRATCH)
+    removed = core._sweep_empty_dirs(SCRATCH)
     check(removed == 3, f"3 nested empty folders removed in one pass (got {removed})")
     check(not (SCRATCH / "deep").exists(), "whole empty nest collapsed")
     check((SCRATCH / "keepme" / "notes.txt").exists(), "folder with a file untouched")
@@ -267,76 +272,65 @@ def test_empty_folder_sweep():
 
 def test_cached_preview_replay():
     build_source()
-    root, app = make_app(operation="move")
-    settings = app._snapshot_settings()
-    app.organize_photos(settings, dry_run=True)
-    check(app.cached_plan is not None, "dry run stores a cached plan")
-    check(len(app.cached_plan['ops']) == TOTAL, f"plan has {TOTAL} ops")
-    check(app.cached_plan['key'] == po.plan_key(settings), "plan key matches settings")
-    ok = app._execute_cached_plan(app.cached_plan, settings)
-    check(ok is True, "cached plan executes when folder unchanged")
-    check(app.stats['processed'] == TOTAL,
-          f"replay processed {TOTAL} (got {app.stats['processed']})")
-    check(app.stats['errors'] == 0, "replay had no errors")
-    check(app.cached_plan is None, "cache consumed after execute")
+    settings = make_settings(operation="move")
+    _stats, plan = core.organize_photos(settings, core.Progress(), dry_run=True)
+    check(plan is not None, "dry run stores a cached plan")
+    check(len(plan['ops']) == TOTAL, f"plan has {TOTAL} ops")
+    check(plan['key'] == core.plan_key(settings), "plan key matches settings")
+
+    stats = core.execute_cached_plan(plan, settings, core.Progress())
+    check(stats is not None, "cached plan executes when folder unchanged")
+    check(stats['processed'] == TOTAL,
+          f"replay processed {TOTAL} (got {stats['processed']})")
+    check(stats['errors'] == 0, "replay had no errors")
     files = relpaths()
     check("Samsung Galaxy S23 Ultra/2023/05-May/cam1.jpg" in files,
           "replay: cam1.jpg at planned target")
     check("iPhone 14 Pro/2023/12-December/real_iphone.heic" in files,
           "replay: HEIC at planned target")
     top_media = [p for p in SCRATCH.iterdir()
-                 if p.is_file() and p.suffix.lower() in po.ALL_MEDIA_EXTS]
+                 if p.is_file() and p.suffix.lower() in core.ALL_MEDIA_EXTS]
     check(top_media == [], "replay: source top level emptied (move)")
     check(len(list(SCRATCH.glob("kjegla_undo_*.jsonl"))) == 1,
           "replay wrote an undo record")
-    root.destroy()
 
 
 def test_cache_invalidation():
-    import os
     build_source()
-    root, app = make_app(operation="move")
-    settings = app._snapshot_settings()
-    app.organize_photos(settings, dry_run=True)
-    check(app.cached_plan is not None, "plan cached")
+    settings = make_settings(operation="move")
+    _stats, plan = core.organize_photos(settings, core.Progress(), dry_run=True)
+    check(plan is not None, "plan cached")
+
     os.utime(SCRATCH / "cam1.jpg", None)
-    ok = app._execute_cached_plan(app.cached_plan, settings)
-    check(ok is False, "modified file -> replay refuses, falls back")
+    check(core.execute_cached_plan(plan, settings, core.Progress()) is None,
+          "modified file -> replay refuses, falls back")
     before = relpaths()
     check(all("/" not in f for f in before), "fallback refused: nothing was moved")
 
-    app.organize_photos(settings, dry_run=True)
-    app.subfolder_mode.set("year")
-    settings2 = app._snapshot_settings()
-    check(app.cached_plan['key'] != po.plan_key(settings2),
-          "different settings -> key mismatch")
-    app.subfolder_mode.set("year-month")
-    settings3 = app._snapshot_settings()
-    app.organize_photos(settings3, dry_run=True)
+    _stats, plan = core.organize_photos(settings, core.Progress(), dry_run=True)
+    other = make_settings(operation="move", subfolder="year")
+    check(plan['key'] != core.plan_key(other), "different settings -> key mismatch")
+
+    _stats, plan = core.organize_photos(settings, core.Progress(), dry_run=True)
     make_img(SCRATCH / "newphoto.jpg", model="SM-S918B", date="2024:01:01 10:00:00")
-    ok = app._execute_cached_plan(app.cached_plan, settings3)
-    check(ok is False, "added file -> replay refuses")
-    root.destroy()
+    check(core.execute_cached_plan(plan, settings, core.Progress()) is None,
+          "added file -> replay refuses")
 
 
 def test_settings_invalidate_cached_preview():
     build_source()
-    root, app = make_app(operation="move")
-    settings = app._snapshot_settings()
-    app.organize_photos(settings, dry_run=True)
-    base_key = app.cached_plan['key']
-    for name, var in [("dedupe_content", app.dedupe_content),
-                      ("check_corrupt", app.check_corrupt),
-                      ("corrupt_thorough", app.corrupt_thorough),
-                      ("cleanup_empty", app.cleanup_empty),
-                      ("fix_extensions", app.fix_extensions)]:
-        var.set(not var.get())
-        check(base_key != po.plan_key(app._snapshot_settings()),
+    settings = make_settings(operation="move")
+    _stats, plan = core.organize_photos(settings, core.Progress(), dry_run=True)
+    base_key = plan['key']
+    for name, changed in [("dedupe_content", {"dedupe": True}),
+                          ("check_corrupt", {"check_corrupt": True}),
+                          ("corrupt_thorough", {"thorough": True}),
+                          ("cleanup_empty", {"cleanup_empty": False}),
+                          ("fix_extensions", {"fix_ext": False})]:
+        check(base_key != core.plan_key(make_settings(operation="move", **changed)),
               f"toggling {name} invalidates the cached preview")
-        var.set(not var.get())
-    check(base_key == po.plan_key(app._snapshot_settings()),
-          "restoring every setting makes the cached preview valid again")
-    root.destroy()
+    check(base_key == core.plan_key(make_settings(operation="move")),
+          "the same settings still match the cached preview")
 
 
 # ---------------------------------------------------------------------------
@@ -450,7 +444,7 @@ def test_misnamed_files_and_undo_renames():
     check(len(rename_records) == 1,
           f"a separate rename undo record was written inside Wrong Extension/ "
           f"(got {len(rename_records)})")
-    rec = po.PhotoOrganizerGUI._read_undo(rename_records[0])
+    rec = core.read_undo(rename_records[0])
     check(len(rec['entries']) == 1, "the rename record covers the 1 rename")
     check(rec['entries'][0][1].endswith("IMG_0607.MOV"),
           "...and remembers the original name")
@@ -487,7 +481,7 @@ def test_unrecognised_extensions_found_by_content_then_rerun():
     (SCRATCH / "notes.txt").write_text("not a photo")
     (SCRATCH / "metadata.json").write_text('{"title": "x"}')
 
-    reg, raw = po.collect_media_files(SCRATCH, False, sniff_unknown=True)
+    reg, raw = core.collect_media_files(SCRATCH, False, sniff_unknown=True)
     found = sorted(p.name for p in reg + raw)
     check("PXL_20250507_050944066.RAW-01.MP.COVER" in found,
           f"the .COVER file is picked up by its contents (got {found})")
@@ -495,7 +489,7 @@ def test_unrecognised_extensions_found_by_content_then_rerun():
     check("notes.txt" not in found, "a text file is still ignored")
     check("metadata.json" not in found, "a Takeout json sidecar is still ignored")
 
-    reg2, raw2 = po.collect_media_files(SCRATCH, False, sniff_unknown=False)
+    reg2, raw2 = core.collect_media_files(SCRATCH, False, sniff_unknown=False)
     check(len(reg2 + raw2) == 1,
           f"with the option off, only normal.jpg is seen (got {len(reg2 + raw2)})")
 
@@ -535,7 +529,7 @@ def test_undo_restores_out_of_set_aside_folders():
     check("Corrupt/src/broken.jpg" in files, "damaged file mirrored its source folder")
     undo_files = sorted(SCRATCH.glob("kjegla_undo_*.jsonl"))
     check(len(undo_files) == 1, "undo record written")
-    record = po.PhotoOrganizerGUI._read_undo(undo_files[0])
+    record = core.read_undo(undo_files[0])
     check(len(record['entries']) == 3,
           f"undo record covers all 3 moves incl. set-aside ones "
           f"(got {len(record['entries'])})")
@@ -582,10 +576,8 @@ def test_standalone_check_files_is_read_only():
     truncate(bad, 300)
     (SCRATCH / "raw.arw").write_bytes(b"fake raw" * 100)
     before = relpaths()
-    root, app = make_app(operation="move", check_corrupt=True)
-    app._run_health_check(app._snapshot_settings())
-    stats = app.stats
-    root.destroy()
+    stats = core.run_health_check(
+        make_settings(operation="move", check_corrupt=True), core.Progress())
     check(relpaths() == before, "check run moved nothing")
     check(stats['damaged'] == 1, f"1 damaged file reported (got {stats['damaged']})")
     check(stats['unchecked'] == 1,
@@ -637,7 +629,7 @@ def test_undo_journal_is_append_only_and_survives_a_torn_tail():
     text = journals[0].read_text(encoding='utf-8')
     cut = text.rstrip("\n").rfind("\n")
     journals[0].write_text(text[:cut + 1] + '["half a writ', encoding='utf-8')
-    record = po.PhotoOrganizerGUI._read_undo(journals[0])
+    record = core.read_undo(journals[0])
     check(record['operation'] == 'move', "the header still reads after a torn tail")
     check(len(record['entries']) == TOTAL - 1,
           f"the torn line is dropped and everything before it survives "
@@ -645,7 +637,7 @@ def test_undo_journal_is_append_only_and_survives_a_torn_tail():
 
     run_undo(journals[0], record)
     restored = [p for p in SCRATCH.iterdir()
-                if p.is_file() and p.suffix.lower() in po.ALL_MEDIA_EXTS]
+                if p.is_file() and p.suffix.lower() in core.ALL_MEDIA_EXTS]
     check(len(restored) == TOTAL - 1,
           f"undo restored every file the journal still held (got {len(restored)})")
 
@@ -660,7 +652,7 @@ def test_undo_record_from_an_older_build_still_works():
         'source': str(SCRATCH),
         'entries': [[str(SCRATCH / "Old Camera" / "moved.jpg"),
                      str(SCRATCH / "moved.jpg")]]}), encoding='utf-8')
-    record = po.PhotoOrganizerGUI._read_undo(legacy)
+    record = core.read_undo(legacy)
     check(record['operation'] == 'move', "legacy record: operation read")
     check(len(record['entries']) == 1, "legacy record: entry read")
     run_undo(legacy, record)
@@ -676,7 +668,7 @@ def test_copy_mode_undo_never_deletes_an_edited_copy():
     run_app(dry_run=False, operation="copy")
     journals = sorted(SCRATCH.glob("kjegla_undo_*.jsonl"))
     check(len(journals) == 1, "the copy run wrote an undo record")
-    record = po.PhotoOrganizerGUI._read_undo(journals[0])
+    record = core.read_undo(journals[0])
     check(record['operation'] == 'copy', "the record knows it was a copy run")
     by_origin = {Path(o).name: Path(t) for t, o in record['entries']}
     edited_copy, kept_copy = by_origin['edited.jpg'], by_origin['keep.jpg']
@@ -696,11 +688,11 @@ def test_copy_mode_undo_never_deletes_an_edited_copy():
 def test_transfers_are_verified_and_a_short_write_keeps_the_original():
     src = SCRATCH / "src.bin"
     src.write_bytes(b"important photo bytes" * 500)
-    po.transfer_file(src, SCRATCH / "copied.bin", "copy")
+    core.transfer_file(src, SCRATCH / "copied.bin", "copy")
     check((SCRATCH / "copied.bin").read_bytes() == src.read_bytes(),
           "copy arrives byte for byte")
     check(src.exists(), "copy leaves the source where it was")
-    po.transfer_file(src, SCRATCH / "moved.bin", "move")
+    core.transfer_file(src, SCRATCH / "moved.bin", "move")
     check(not src.exists(), "move removes the source")
     check((SCRATCH / "moved.bin").read_bytes()
           == (SCRATCH / "copied.bin").read_bytes(), "move arrives byte for byte")
@@ -710,17 +702,17 @@ def test_transfers_are_verified_and_a_short_write_keeps_the_original():
     # globally here and restored in the finally, so nothing else is affected.
     victim = SCRATCH / "victim.bin"
     victim.write_bytes(b"the only copy of this photo" * 100)
-    real_copy2, real_same_volume = po.shutil.copy2, po._same_volume
-    po.shutil.copy2 = lambda s, d: Path(d).write_bytes(Path(s).read_bytes()[:10])
-    po._same_volume = lambda a, b: False
+    real_copy2, real_same_volume = core.shutil.copy2, core._same_volume
+    core.shutil.copy2 = lambda s, d: Path(d).write_bytes(Path(s).read_bytes()[:10])
+    core._same_volume = lambda a, b: False
     raised = False
     try:
         try:
-            po.transfer_file(victim, SCRATCH / "landed.bin", "move")
+            core.transfer_file(victim, SCRATCH / "landed.bin", "move")
         except OSError:
             raised = True
     finally:
-        po.shutil.copy2, po._same_volume = real_copy2, real_same_volume
+        core.shutil.copy2, core._same_volume = real_copy2, real_same_volume
     check(raised, "a short write is caught and raised rather than passing silently")
     check(victim.exists(), "the original survives a failed move")
     check(victim.stat().st_size == 2700,

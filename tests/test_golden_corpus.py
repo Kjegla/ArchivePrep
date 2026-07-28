@@ -1,4 +1,4 @@
-"""The golden corpus: byte patterns a real archive actually contains.
+﻿"""The golden corpus: byte patterns a real archive actually contains.
 
 Every entry is a file shape that ``file_health()`` must return a specific
 verdict for. Most of them exist because a real photo was once judged wrongly:
@@ -20,7 +20,7 @@ import struct
 import pytest
 
 from conftest import SCRATCH, check, make_img, make_mp4_with_date, truncate
-import photo_organizer as po
+import organizer_core as core
 
 
 # --------------------------------------------------------------------------
@@ -278,7 +278,7 @@ GOLDEN = [
 def test_golden_corpus_quick(builder, expected, why):
     """Quick mode must return the recorded verdict for every case."""
     path = builder(SCRATCH)
-    status, reason = po.file_health(path)
+    status, reason = core.file_health(path)
     check(status == expected,
           f"expected {expected!r}, got {status!r} ({reason})\n"
           f"this case exists because: {why}")
@@ -293,7 +293,7 @@ def test_golden_corpus_thorough(builder, expected, why):
     quick mode and damaged in thorough mode would mean one of the two is
     lying to the user."""
     path = builder(SCRATCH)
-    status, reason = po.file_health(path, thorough=True)
+    status, reason = core.file_health(path, thorough=True)
     check(status == expected,
           f"thorough mode disagrees with quick mode: expected {expected!r}, "
           f"got {status!r} ({reason})\nthis case exists because: {why}")
@@ -302,24 +302,24 @@ def test_golden_corpus_thorough(builder, expected, why):
 def test_verdict_reasons_name_the_real_format():
     """A misnamed file's reason has to say what the file actually is, or the
     user has no way to judge whether the rename is safe."""
-    _, reason = po.file_health(_jpeg_named_mov(SCRATCH))
+    _, reason = core.file_health(_jpeg_named_mov(SCRATCH))
     check("JPEG image" in reason, f"the reason must name the real format ({reason})")
-    _, reason = po.file_health(_webp_named_png(SCRATCH))
+    _, reason = core.file_health(_webp_named_png(SCRATCH))
     check("WEBP" in reason, f"...and for WEBP too ({reason})")
 
 
 def test_sniff_says_nothing_rather_than_guessing():
-    check(po.sniff_real_format(b'\xff\xd8\xff\xe0' + b'x' * 12)[0] == 'JPEG image',
+    check(core.sniff_real_format(b'\xff\xd8\xff\xe0' + b'x' * 12)[0] == 'JPEG image',
           "sniff detects JPEG")
-    check(po.sniff_real_format(b'RIFF' + b'\x00' * 4 + b'WEBP' + b'x' * 4)[0]
+    check(core.sniff_real_format(b'RIFF' + b'\x00' * 4 + b'WEBP' + b'x' * 4)[0]
           == 'WEBP image', "sniff detects WEBP without confusing it with AVI")
-    check(po.sniff_real_format(b'total garbage!!!')[0] is None,
+    check(core.sniff_real_format(b'total garbage!!!')[0] is None,
           "an unknown format produces no verdict at all, rather than a guess")
 
 
 def test_jpeg_scan_start_locates_the_photo_data():
     good = _good_jpeg(SCRATCH)
     size = good.stat().st_size
-    start = po._jpeg_scan_start(good, size)
+    start = core._jpeg_scan_start(good, size)
     check(start > 0, f"_jpeg_scan_start locates the photo's data (got {start})")
     check(start < size, "...and it is inside the file")

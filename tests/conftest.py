@@ -20,12 +20,13 @@ import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 # Import the app from the repo root, wherever this checkout happens to live
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import photo_organizer as po  # noqa: E402
+import organizer_core as core  # noqa: E402
 
 from PIL import Image as PILImage  # noqa: E402
 
@@ -34,6 +35,11 @@ SCRATCH = Path(tempfile.gettempdir()) / "photo_organizer_tests"
 
 # How many media files build_source() lays down
 TOTAL = 15
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers", "gui: opens a real Tk window; skip with -m 'not gui'")
 
 
 @pytest.fixture(autouse=True)
@@ -80,9 +86,9 @@ def make_img(path, model=None, date=None, size=(640, 480), color='red', fmt=None
     img = PILImage.new('RGB', size, color)
     exif = PILImage.Exif()
     if model:
-        exif[po.TAG_MODEL] = model
+        exif[core.TAG_MODEL] = model
     if date:
-        exif[po.TAG_DATETIME] = date
+        exif[core.TAG_DATETIME] = date
     img.save(path, format=fmt, exif=exif.tobytes())
 
 
@@ -94,12 +100,12 @@ def make_big_img(path, seed=1):
     img.putdata([(rnd.randrange(256), rnd.randrange(256), rnd.randrange(256))
                  for _ in range(400 * 400)])
     img.save(path, format='PNG')
-    assert path.stat().st_size > po.HEAD_HASH_BYTES, path.stat().st_size
+    assert path.stat().st_size > core.HEAD_HASH_BYTES, path.stat().st_size
 
 
 def make_mp4_with_date(path, dt):
     """Craft a minimal ISO-BMFF file with a moov/mvhd creation time."""
-    ctime = int(dt.timestamp()) + po.MP4_EPOCH_OFFSET
+    ctime = int(dt.timestamp()) + core.MP4_EPOCH_OFFSET
     mvhd_payload = (bytes(4) + struct.pack('>I', ctime) * 2 +
                     struct.pack('>I', 1000) + struct.pack('>I', 0) + bytes(76))
     mvhd = struct.pack('>I', 8 + len(mvhd_payload)) + b'mvhd' + mvhd_payload
@@ -148,49 +154,48 @@ def build_source():
 # --------------------------------------------------------------------------
 # Driving the real application
 # --------------------------------------------------------------------------
+# These call the core directly with the same settings object the window
+# builds, so no test here needs a screen. test_gui_wiring.py covers the one
+# thing that skips: that the window really does produce that object and hand
+# it over.
 
-def make_app(operation="copy", subfolder="year-month", separate_raw=True,
-             separate_screenshots=True, multithread=True,
-             include_subfolders=False, dedupe=False, check_corrupt=False,
-             thorough=False, cleanup_empty=True, fix_ext=True):
-    """The real app, with its window hidden - so what is tested is what
-    ships, not a stripped-down copy of the logic."""
-    import tkinter as tk
-    root = tk.Tk()
-    root.withdraw()
-    app = po.PhotoOrganizerGUI(root)
-    app.source_folder.set(str(SCRATCH))
-    app.operation_mode.set(operation)
-    app.subfolder_mode.set(subfolder)
-    app.separate_raw.set(separate_raw)
-    app.separate_screenshots.set(separate_screenshots)
-    app.use_multithreading.set(multithread)
-    app.include_subfolders.set(include_subfolders)
-    app.dedupe_content.set(dedupe)
-    app.check_corrupt.set(check_corrupt)
-    app.corrupt_thorough.set(thorough)
-    app.cleanup_empty.set(cleanup_empty)
-    app.fix_extensions.set(fix_ext)
-    return root, app
+def make_settings(operation="copy", subfolder="year-month", separate_raw=True,
+                  separate_screenshots=True, multithread=True,
+                  include_subfolders=False, dedupe=False, check_corrupt=False,
+                  thorough=False, cleanup_empty=True, fix_ext=True):
+    """Exactly what PhotoOrganizerGUI._snapshot_settings() hands the core."""
+    return SimpleNamespace(
+        source=str(SCRATCH),
+        operation=operation,
+        subfolder_mode=subfolder,
+        separate_raw=separate_raw,
+        separate_screenshots=separate_screenshots,
+        use_multithreading=multithread,
+        include_subfolders=include_subfolders,
+        dedupe_content=dedupe,
+        check_corrupt=check_corrupt,
+        corrupt_thorough=thorough,
+        cleanup_empty=cleanup_empty,
+        fix_extensions=fix_ext,
+        max_threads=4,
+    )
 
 
 def run_app(dry_run, **kwargs):
-    root, app = make_app(**kwargs)
-    settings = app._snapshot_settings()
-    app.organize_photos(settings, dry_run=dry_run)
-    stats = app.stats
-    root.destroy()
+    """Organize the scratch folder; returns the run statistics."""
+    stats, _plan = core.organize_photos(make_settings(**kwargs), core.Progress(),
+                                        dry_run=dry_run)
     return stats
 
 
+def run_app_planned(dry_run, **kwargs):
+    """As run_app, but also hands back the cached plan a preview produced."""
+    return core.organize_photos(make_settings(**kwargs), core.Progress(),
+                                dry_run=dry_run)
+
+
 def run_undo(undo_file, record, label=None):
-    """Drive a real undo through the app."""
-    import tkinter as tk
-    root = tk.Tk()
-    root.withdraw()
-    app = po.PhotoOrganizerGUI(root)
-    app._run_undo(undo_file, record, label=label)
-    root.destroy()
+    core.run_undo(Path(undo_file), record, core.Progress(), label=label)
 
 
 def relpaths():
