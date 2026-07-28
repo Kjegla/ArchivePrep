@@ -27,6 +27,7 @@ The byte-level verdicts of file_health() live in test_golden_corpus.py.
 import json
 import os
 import shutil
+import struct
 from datetime import datetime
 from pathlib import Path
 
@@ -71,9 +72,13 @@ def test_dry_run_then_copy_then_rerun():
     expected = [
         "Samsung Galaxy S23 Ultra/2023/05-May/cam1.jpg",
         "Samsung Galaxy S23 Ultra/2023/06-June/clip.jpg",
-        "Samsung Galaxy S23 Ultra/2021/07-July/Videos/clip.mp4",
+        # The video and the RAW below now land in the same date folder as the
+        # image they were captured with. Both used to be filed by their file
+        # modified time - 2021/07-July - which put one shutter press in two
+        # different years. That split was asserted as correct until V4 M1.
+        "Samsung Galaxy S23 Ultra/2023/06-June/Videos/clip.mp4",
         "Sony A6000/2022/01-January/DSC00001.JPG",
-        "Sony A6000/2021/07-July/RAW/DSC00001.ARW",
+        "Sony A6000/2022/01-January/RAW/DSC00001.ARW",
         "Unknown Camera/2021/07-July/RAW/DSC09999.ARW",
         "Unknown Camera/2021/07-July/Videos/lonely.mp4",
         "Unknown Camera/2019/06-June/Videos/dated_video.mp4",
@@ -482,7 +487,7 @@ def test_unrecognised_extensions_found_by_content_then_rerun():
     (SCRATCH / "notes.txt").write_text("not a photo")
     (SCRATCH / "metadata.json").write_text('{"title": "x"}')
 
-    reg, raw = core.collect_media_files(SCRATCH, False, sniff_unknown=True)
+    reg, raw = core.collect_media_files(SCRATCH, False)
     found = sorted(p.name for p in reg + raw)
     check("PXL_20250507_050944066.RAW-01.MP.COVER" in found,
           f"the .COVER file is picked up by its contents (got {found})")
@@ -490,9 +495,13 @@ def test_unrecognised_extensions_found_by_content_then_rerun():
     check("notes.txt" not in found, "a text file is still ignored")
     check("metadata.json" not in found, "a Takeout json sidecar is still ignored")
 
-    reg2, raw2 = core.collect_media_files(SCRATCH, False, sniff_unknown=False)
-    check(len(reg2 + raw2) == 1,
-          f"with the option off, only normal.jpg is seen (got {len(reg2 + raw2)})")
+    # Finding these files is no longer optional (STATUS.md #4). Turning off
+    # "fix wrong extensions" used to hide them entirely - never sorted, never
+    # checked, never deduplicated - rather than merely leaving them alone.
+    stats = run_app(dry_run=True, operation="move", fix_ext=False)
+    check(stats['total_files'] == 3,
+          f"all 3 media files are seen even with extension fixing off "
+          f"(got {stats['total_files']})")
 
     # 2. Organizing renames them to what they actually are
     run_app(dry_run=False, operation="move", check_corrupt=True)
@@ -733,6 +742,151 @@ def test_copy_mode_undo_never_deletes_an_edited_copy():
           "copy mode left both originals alone throughout")
 
 
+def _takeout_sidecar(media_name, taken, extra_suffix=".supplemental-metadata"):
+    """What Google Takeout writes next to a photo."""
+    (SCRATCH / f"{media_name}{extra_suffix}.json").write_text(json.dumps({
+        "title": media_name,
+        "photoTakenTime": {"timestamp": str(int(taken.timestamp()))},
+        "creationTime": {"timestamp": str(int(datetime(2025, 1, 1).timestamp()))},
+    }), encoding='utf-8')
+
+
+def test_takeout_sidecar_supplies_the_date_when_exif_is_gone():
+    """Takeout strips EXIF from some files. Without the sidecar those photos
+    fall back to the file's modified time, which on an export is the date you
+    downloaded it - so they get filed under the wrong year entirely."""
+    stripped = SCRATCH / "PXL_20190612_101500000.jpg"
+    make_img(stripped, color='purple')          # no EXIF date at all
+    _takeout_sidecar(stripped.name, datetime(2019, 6, 12, 10, 15))
+
+    stats = run_app(dry_run=False, operation="move")
+    files = relpaths()
+    check(any("2019/06-June" in f and f.endswith(".jpg") for f in files),
+          f"the photo was filed under the year it was taken (got {files})")
+    check(stats['by_year'].get('2019') == 1,
+          f"...and counted there (got {stats['by_year']})")
+    check((SCRATCH / f"{stripped.name}.supplemental-metadata.json").exists(),
+          "the sidecar itself was left exactly where it was")
+
+
+def test_a_files_own_exif_always_beats_its_sidecar():
+    """The sidecar only answers when the file cannot. Google's record of a
+    photo is good evidence; the photo's own is better."""
+    photo = SCRATCH / "IMG_2020.jpg"
+    make_img(photo, model="SM-S918B", date="2020:03:04 11:00:00")
+    _takeout_sidecar(photo.name, datetime(2011, 1, 1, 9, 0))   # deliberately wrong
+
+    run_app(dry_run=False, operation="move")
+    files = relpaths()
+    check(any("2020/03-March" in f for f in files),
+          f"EXIF won (got {files})")
+    check(not any("2011" in f for f in files),
+          "the sidecar did not override the file's own metadata")
+
+
+def test_sidecar_is_found_even_when_takeout_truncated_its_name():
+    """Takeout truncates long names, sometimes part-way through
+    '.supplemental-metadata', so the sidecar cannot be found by guessing an
+    exact filename."""
+    photo = SCRATCH / "PXL_20180101_120000000.jpg"
+    make_img(photo, color='red')
+    _takeout_sidecar(photo.name, datetime(2018, 1, 1, 12, 0),
+                     extra_suffix=".supplemental-me")   # chopped mid-word
+
+    run_app(dry_run=False, operation="move")
+    check(any("2018/01-January" in f for f in relpaths()),
+          f"the truncated sidecar was still matched (got {relpaths()})")
+
+    check(core.read_sidecar_date(SCRATCH / "nope.json") is None,
+          "a missing sidecar is not an error")
+    bad = SCRATCH / "bad.json"
+    bad.write_text("{not json at all", encoding='utf-8')
+    check(core.read_sidecar_date(bad) is None, "an unreadable sidecar is not an error")
+
+
+def test_a_capture_keeps_its_files_together():
+    """One shutter press, one destination. A RAW carries no date this
+    application reads, so it used to be filed by its file time and land in a
+    different year from the JPEG it was taken with."""
+    make_img(SCRATCH / "DSC01234.JPG", model="ILCE-6000", date="2016:08:09 14:00:00")
+    (SCRATCH / "DSC01234.ARW").write_bytes(b"raw bytes for 1234" * 50)
+    # a second, unrelated capture in the same folder
+    make_img(SCRATCH / "DSC05555.JPG", model="ILCE-6000", date="2021:02:03 10:00:00")
+    (SCRATCH / "DSC05555.ARW").write_bytes(b"raw bytes for 5555" * 50)
+
+    run_app(dry_run=False, operation="move")
+    files = relpaths()
+    check("Sony A6000/2016/08-August/DSC01234.JPG" in files,
+          f"the JPEG went by its EXIF date (got {files})")
+    check("Sony A6000/2016/08-August/RAW/DSC01234.ARW" in files,
+          "its RAW followed it, rather than being filed by the file time")
+    check("Sony A6000/2021/02-February/RAW/DSC05555.ARW" in files,
+          "and the other capture's RAW followed its own JPEG, not this one")
+
+
+def test_captures_do_not_reach_across_folders():
+    """Two folders can easily both hold an IMG_1234.jpg from different years.
+    Treating those as one capture would hand a photo the wrong date, so a
+    capture is deliberately scoped to a single folder."""
+    (SCRATCH / "holiday").mkdir()
+    (SCRATCH / "work").mkdir()
+    make_img(SCRATCH / "holiday" / "IMG_1234.jpg", model="SM-S918B",
+             date="2016:07:01 12:00:00")
+    (SCRATCH / "work" / "IMG_1234.dng").write_bytes(b"unrelated raw" * 60)
+
+    run_app(dry_run=False, operation="move", include_subfolders=True)
+    files = relpaths()
+    check("Samsung Galaxy S23 Ultra/2016/07-July/IMG_1234.jpg" in files,
+          f"the photo went by its own date (got {files})")
+    check(not any("2016/07-July" in f and f.endswith(".dng") for f in files),
+          "the unrelated RAW in another folder did NOT inherit that date")
+
+
+def test_a_clip_already_inside_its_photo_is_redundant():
+    """A motion photo is one file: a complete JPEG with a short MP4 welded on
+    the back. Takeout writes that MP4 out a second time as its own file, and
+    truncation strips its extension - so the same bytes are stored twice.
+    Matched by content, never by name."""
+    clip_bytes = (struct.pack('>I', 16) + b'ftyp' + b'isom\x00\x00\x02\x00'
+                  + bytes(range(256)) * 120)
+    photo = SCRATCH / "PXL_20250615_013103222.MP.jpg"
+    make_img(photo, model="SM-S918B", date="2025:06:15 01:31:00")
+    photo.write_bytes(photo.read_bytes() + clip_bytes)
+    # the separate copy Takeout also wrote, extension chopped off
+    (SCRATCH / "PXL_20250615_013103222.MP").write_bytes(clip_bytes)
+    # a genuine video of its own, which must not be touched
+    make_mp4_with_date(SCRATCH / "real_video.mp4", datetime(2025, 6, 15, 2, 0))
+
+    stats = run_app(dry_run=False, operation="move", dedupe=True)
+    files = relpaths()
+    check(any(f.startswith("Duplicates/") and "MP" in f for f in files),
+          f"the redundant clip was set aside (got {files})")
+    check(any(f.endswith("PXL_20250615_013103222.MP.jpg") for f in files),
+          "the motion photo itself was organized as normal")
+    check(any(f.endswith("real_video.mp4") and not f.startswith("Duplicates/")
+              for f in files),
+          "a genuine video was left completely alone")
+
+    reports = list(SCRATCH.glob("kjegla_duplicates_*.txt"))
+    check(len(reports) == 1, "the duplicate report covers it")
+
+
+def test_a_video_is_only_redundant_when_it_really_is_inside_the_photo():
+    """The rule is about bytes, not names. A clip that merely shares a photo
+    name is not a spare copy of anything."""
+    photo = SCRATCH / "PXL_20250615_013103222.MP.jpg"
+    make_img(photo, model="SM-S918B", date="2025:06:15 01:31:00")
+    photo.write_bytes(photo.read_bytes() + bytes(range(256)) * 100)
+    # same capture name, but its bytes are NOT the tail of the photo
+    make_mp4_with_date(SCRATCH / "PXL_20250615_013103222.MP.mp4",
+                       datetime(2025, 6, 15, 1, 31))
+
+    run_app(dry_run=False, operation="move", dedupe=True)
+    files = relpaths()
+    check(not any(f.startswith("Duplicates/") for f in files),
+          f"nothing was called redundant on the strength of its name (got {files})")
+
+
 def test_preview_and_a_fresh_execute_agree_on_every_file():
     """The defect this exists to prevent: preview and execute used to be two
     separate implementations, and had already grown different collision
@@ -817,12 +971,24 @@ def test_manifest_records_every_file_and_what_became_of_it():
     check(cam1['verdict'] in ('ok', 'unchecked'),
           f"...with its integrity verdict (got {cam1['verdict']})")
 
-    # A RAW has no EXIF of its own, so its date honestly says where it came from
-    check(by_name['DSC00001.ARW']['date_source'] == 'mtime',
-          f"a RAW's date is recorded as coming from the file time "
-          f"(got {by_name['DSC00001.ARW']['date_source']})")
-    check(by_name['DSC00001.ARW']['camera_model'] == 'Sony A6000',
-          "...while its camera was borrowed from the JPEG it was taken with")
+    # A RAW has no EXIF this application reads, so it takes both its date and
+    # its camera from the JPEG it was captured with - and the manifest says so
+    raw = by_name['DSC00001.ARW']
+    check(raw['date_source'] == 'capture',
+          f"a RAW's date is recorded as coming from its capture "
+          f"(got {raw['date_source']})")
+    check(raw['camera_model'] == 'Sony A6000',
+          "...along with its camera, from the JPEG it was taken with")
+    check(raw['capture_id'] == by_name['DSC00001.JPG']['capture_id'],
+          "...and both are recorded as one capture")
+    # STATUS.md #2: a RAW with no surviving JPEG has no capture siblings, so
+    # it inherits nothing rather than being assumed into the others' folder
+    check(by_name['DSC09999.ARW']['date_source'] != 'capture',
+          f"a RAW with no surviving JPEG inherits no date from anywhere "
+          f"(got {by_name['DSC09999.ARW']['date_source']})")
+    check(by_name['DSC09999.ARW']['capture_id']
+          != by_name['DSC00001.ARW']['capture_id'],
+          "...and is not lumped into someone else's capture")
 
     screenshot = by_name['Screenshot_20240101-120000.png']
     check(screenshot['is_screenshot'] == 'yes',

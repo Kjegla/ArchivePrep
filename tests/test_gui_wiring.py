@@ -21,10 +21,26 @@ import photo_organizer as po
 pytestmark = pytest.mark.gui
 
 
-def make_app(**settings):
-    """The real window, hidden, with its widgets set from make_settings()."""
+@pytest.fixture(scope="module")
+def tk_root():
+    """One Tk root for the whole module.
+
+    Creating and destroying a root per test is flaky - Tcl intermittently
+    fails with "invalid command name tcl_findLibrary" when a second root goes
+    up in the same process. Each test gets its own Toplevel on this one
+    instead, which is what the window would be in a real session anyway.
+    """
     import tkinter as tk
     root = tk.Tk()
+    root.withdraw()
+    yield root
+    root.destroy()
+
+
+def make_app(tk_root, **settings):
+    """The real window, hidden, with its widgets set from make_settings()."""
+    import tkinter as tk
+    root = tk.Toplevel(tk_root)
     root.withdraw()
     app = po.PhotoOrganizerGUI(root)
     s = make_settings(**settings)
@@ -50,10 +66,10 @@ def wait_for_idle(app, timeout=120):
     assert not app.processing, "the worker thread never finished"
 
 
-def test_window_builds_the_settings_the_core_expects():
+def test_window_builds_the_settings_the_core_expects(tk_root):
     """If the window ever stops supplying a field the core reads, every other
     test in this suite would still pass. This is the one that would not."""
-    root, app = make_app(operation="move", subfolder="year")
+    root, app = make_app(tk_root, operation="move", subfolder="year")
     try:
         from_window = vars(app._snapshot_settings())
         from_tests = vars(make_settings(operation="move", subfolder="year"))
@@ -71,11 +87,11 @@ def test_window_builds_the_settings_the_core_expects():
         root.destroy()
 
 
-def test_window_organizes_end_to_end_through_its_own_path():
+def test_window_organizes_end_to_end_through_its_own_path(tk_root):
     """Drives _start_worker, so the settings snapshot, the worker thread, the
     core call and the results coming back are all exercised together."""
     build_source()
-    root, app = make_app(operation="move")
+    root, app = make_app(tk_root, operation="move")
     try:
         app._start_worker(dry_run=False)
         wait_for_idle(app)
@@ -91,9 +107,9 @@ def test_window_organizes_end_to_end_through_its_own_path():
         root.destroy()
 
 
-def test_preview_caches_a_plan_and_execute_consumes_it():
+def test_preview_caches_a_plan_and_execute_consumes_it(tk_root):
     build_source()
-    root, app = make_app(operation="move")
+    root, app = make_app(tk_root, operation="move")
     try:
         app._start_worker(dry_run=True)
         wait_for_idle(app)
@@ -112,10 +128,10 @@ def test_preview_caches_a_plan_and_execute_consumes_it():
         root.destroy()
 
 
-def test_cancel_reaches_the_core():
+def test_cancel_reaches_the_core(tk_root):
     """Cancel works by setting an event the core polls; prove the window's
     button is wired to the same event the core is handed."""
-    root, app = make_app()
+    root, app = make_app(tk_root)
     try:
         check(app.progress.cancelled is False, "not cancelled to begin with")
         app.cancel_operation()

@@ -1,90 +1,87 @@
-# V35 status
+# V4 status
 
-**This branch is unfinished.** It is pushed so the work is not lost, ahead of a
-full architectural review (V40). The released version is still
-[v34](../../releases).
+**This branch is unfinished.** The released version is still
+[v34](../../releases). Nothing here has been built into a download and no tag
+has been created, so the Releases page is untouched.
 
-Nothing here has been built into a download, and no tag has been created, so
-the Releases page is untouched.
+`v35-wip` remains as the historical snapshot of the last script-based
+generation. V4 is a new architectural generation, not an extension of it.
 
-## What works, and is proven
+## What V4 is for
 
-All five V35 features are implemented and covered by the test suite:
+**Prepare messy media collections for long-term archival.** It analyses,
+transforms, and gets out of the way. It is not, and will not become, a digital
+asset manager - no database, no catalog, no thumbnail browser, no editor, no
+cloud. The absence of a library is the product.
 
-| Feature | What it does |
+It runs *before* Immich, digiKam or a NAS, not instead of them.
+
+## Where it stands
+
+Four tiers are done. Every one ended with the full suite green.
+
+| Tier | What landed |
 |---|---|
-| Duplicates by content | Byte-for-byte matches only, never by filename. Extra copies go to `Duplicates/`, mirroring where they came from |
-| Smart keeper picking | A damaged copy can never beat a healthy one; real camera info beats none; `IMG_1234.jpg` beats `IMG_1234 (1).jpg` |
-| Damage check | Standalone **🩺 Check Files** button plus an opt-in check while organizing. Quick and Thorough modes |
-| Empty-folder sweep | Bottom-up across the whole source tree. Only genuinely empty folders; no file is ever deleted |
-| Wrong extensions | Renamed to the correct extension and set aside in `Wrong Extension/`, with its own **↩️ Undo Renames** button |
+| **1 Safety** | Append-only undo journal; every transfer verified; copy-mode undo no longer deletes blindly |
+| **2 Safety net** | pytest, independent tests, the golden corpus |
+| **3 Structure** | Core split from the window; one record per file; deciding split from doing; per-run manifest; CI runs the tests |
+| **4 Understanding** | One place that identifies a file; Takeout sidecar dates; captures; embedded motion clips |
 
-**218 automated checks pass.** They drive the real app with its window hidden,
-against real generated files in a temporary folder - so what is tested is what
-ships, not a stripped-down copy of the logic:
+**93 tests, 333 checks.** 89 of them need no screen at all.
 
 ```bash
-python tests/test_photo_organizer.py
+pip3 install -r requirements-dev.txt
+python -m pytest tests/ -q
 ```
 
-Tested against two real photo collections, not just fixtures - which is what
-caught four separate classes of false positive that the fixtures missed
-(zero-padded JPEGs, iPhone MPO portrait shots, Pixel and Samsung motion photos,
-and images whose extension lied about their format):
+## The V35 open questions are all answered
 
-| Collection | Files | Damaged | Wrong extension |
-|---|---|---|---|
-| Google Takeout | 3,322 | **0** | 30 |
-| iPhone backup | 815 | 1 (genuine) | 185 |
+These were left deliberately undecided for the V4 review.
 
-Every "damaged" verdict is cross-examined by independently asking Pillow to
-fully decode the file. **No false positives remain** across 4,137 real photos.
+**1. The redundant motion-photo clips.** Resolved. A video whose bytes sit,
+byte for byte, at the end of a photo from the same capture is a duplicate of
+it and goes to `Duplicates/` with that reason. Matched by content, never by
+name - Takeout's naming has changed before and Samsung does the same thing
+under different names.
 
-## What is not proven
+**2. RAW files with no surviving JPEG.** Resolved by the capture rule rather
+than by a decision. Files from one shutter press share a date; a RAW with no
+capture siblings inherits nothing and stays honestly unidentified instead of
+being assumed into the folder of the others.
 
-- The RAW/Pixel matching added last (`media_base_name`, `lookup_model`,
-  `camera_from_filename`) **has no automated test yet.** It was verified by hand
-  against the real Takeout folder - 888 of 897 RAW files now match their JPEG
-  and land under `Pixel 9 Pro`, the remaining 9 under `Google Pixel`, none in
-  `Unknown Camera` - but nothing in the suite guards it against regressions.
+**3. Harmless versus breaking extension mismatches.** The distinction now
+exists and is reported: a WEBP called `.png` opens everywhere (`harmless`), a
+photo called `.MOV` is handed to a video player and fails (`breaking`), and so
+is a Takeout file whose extension was truncated away. **What is done about
+them has not changed** - both still go to `Wrong Extension/`. The information
+comes first; changing the behaviour is a separate decision.
 
-## Open questions - deliberately undecided
+**4. Unknown-extension sniffing was tied to extension fixing.** Resolved by
+removing the coupling. Turning off "fix wrong extensions" used to *hide* those
+files completely - never sorted, never checked, never deduplicated. Finding a
+file and deciding what to do with it are different questions, and only the
+second is the user's to answer.
 
-These are for the V40 review. They were left open on purpose rather than
-guessed at.
+## What changed that you would notice
 
-1. **The 14 redundant motion-photo clips.** Google Takeout exports the video
-   half of a motion photo a second time as a separate file, already byte-for-byte
-   inside the matching `.jpg`. Where should those go - `Duplicates/`, their own
-   folder, or left alone with a note in the report? Evidence and the proposed
-   detection rule are in [GOOGLE_TAKEOUT_NOTES.md](GOOGLE_TAKEOUT_NOTES.md).
+- **A RAW and the JPEG it was taken with now land in the same date folder.**
+  They used to be split across different years, because a RAW carries no date
+  this application reads and fell back to the file's modified time. The old
+  behaviour was asserted as correct by the test suite until V4.
+- **Photos whose EXIF Google stripped are filed by when they were taken**,
+  read from the Takeout sidecar, instead of by when you downloaded the export.
+- **Every run writes `kjegla_manifest_*.csv`** - one row per file: what it was,
+  what was decided, where it went, its camera, its date and *where that date
+  came from*, its integrity verdict, and its content hash where the duplicate
+  hunt already computed one. This is what to read when merging a batch into an
+  existing archive.
+- **The run log lists decisions, then actions**, rather than interleaving them.
+  That is the honest consequence of deciding everything before moving anything.
 
-2. **RAW files with no surviving JPEG.** 9 of them can be identified as a Pixel
-   from the filename but not as *which* Pixel, so they get a generic
-   `Google Pixel` folder next to `Pixel 9 Pro`. Should they be assumed to be the
-   same model as the other 888, or kept honestly separate?
+## Not yet done
 
-3. **Harmless versus breaking extension mismatches.** A WEBP named `.png` opens
-   fine everywhere; a photo named `.MOV` does not open at all. Both are
-   currently flagged the same way. Should they be?
-
-4. **Unknown-extension sniffing is tied to extension fixing.** Turning off
-   "fix wrong extensions" also stops the app reading file headers to identify
-   unfamiliar extensions, which hides files rather than just leaving them
-   alone. These should probably be separate options.
-
-## Known housekeeping
-
-- An iPhone backup folder was organized with an **older build** whose damage
-  check produced false positives. It needs **↩️ Undo Last Run** before being
-  re-run, otherwise its `Corrupt/` folder still reflects the old, wrong
-  verdicts.
-
-## Building it
-
-There is no download for this branch. To run it:
-
-```bash
-pip3 install -r requirements.txt
-python3 photo_organizer.py
-```
+- Sidecar dates cover Google Takeout JSON. `.xmp` and `.aae` are not read.
+- Sidecar files are not carried along into the organised output.
+- The output layout is still camera-model first, with no choice of template.
+- Manifest hashing is opportunistic by design: a file with a unique size is
+  never read, so it has no hash. dupeGuru still owns cross-archive comparison.

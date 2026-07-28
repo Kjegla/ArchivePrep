@@ -786,14 +786,59 @@ def sniff_real_format(head):
     return None, None, None
 
 
-def canonical_extension_for(file_path):
-    """The extension a file *should* have, based on its contents. None if we
-    can't say confidently."""
+def probe_file(file_path):
+    """What a file actually is, read from its first bytes.
+
+    Returns (real_format, valid_extensions, canonical_extension), or three
+    Nones when the format is not one we can name confidently - in which case
+    we say nothing rather than guess.
+
+    This is the one place that asks the question. Everything that needs to
+    know what a file really is goes through here.
+    """
     try:
         with open(file_path, 'rb') as f:
-            return sniff_real_format(f.read(16))[2]
+            return sniff_real_format(f.read(16))
     except OSError:
-        return None
+        return None, None, None
+
+
+# Which kind of program opens a file. A name that lies within a kind is a
+# nuisance; a name that lies across kinds stops the file opening at all.
+def _media_class(ext):
+    ext = (ext or '').lower()
+    if ext in IMAGE_EXTS or ext in RAW_EXTS:
+        return 'image'
+    if ext in VIDEO_EXTS:
+        return 'video'
+    return 'unknown'
+
+
+def extension_verdict(file_path, real_format, valid_exts, canonical):
+    """How badly, if at all, a file's name disagrees with its contents.
+
+    'ok'       - the name is right, or we cannot say what the file is
+    'harmless' - the name is wrong but points at the same kind of media, so
+                 viewers open it anyway. A WEBP saved as .png displays fine
+                 everywhere; nothing is broken and nothing needs doing.
+    'breaking' - the name sends the file to entirely the wrong program. A
+                 photo called .MOV is handed to a video player and simply
+                 fails to open, and a Google Takeout file whose extension was
+                 truncated away is invisible to everything, including this
+                 application until it sniffs the contents.
+
+    STATUS.md #3 asked whether these two deserve the same treatment. They
+    plainly do not, and now the difference is recorded and reported. What is
+    *done* about it has deliberately not changed yet: both still go to
+    Wrong Extension/, so nothing silently starts behaving differently on an
+    archive that has already been organized once.
+    """
+    suffix = file_path.suffix.lower()
+    if not real_format or suffix in valid_exts:
+        return 'ok'
+    if _media_class(suffix) == _media_class(canonical):
+        return 'harmless'
+    return 'breaking'
 
 
 def file_health(file_path, thorough=False, format_only=False):
@@ -820,13 +865,7 @@ def file_health(file_path, thorough=False, format_only=False):
 
     # Before anything else: does the file's own header agree with its
     # extension? Checking a JPEG as if it were a video reports nonsense.
-    try:
-        with open(file_path, 'rb') as f:
-            head = f.read(16)
-    except OSError as e:
-        return 'damaged', f"unreadable ({e})"
-
-    real_format, valid_exts, canonical = sniff_real_format(head)
+    real_format, valid_exts, canonical = probe_file(file_path)
     if real_format and suffix not in valid_exts:
         named = suffix.lstrip('.').upper() or "(no extension)"
         return 'misnamed', (f"contents are a {real_format}, not a {named} "
@@ -906,16 +945,20 @@ def looks_like_media_by_content(file_path):
     invisible to the organizer: never sorted, never checked, never deduped.
     Reads 16 bytes, so it costs essentially nothing.
     """
-    try:
-        with open(file_path, 'rb') as f:
-            return sniff_real_format(f.read(16))[0] is not None
-    except OSError:
-        return False
+    return probe_file(file_path)[0] is not None
 
 
-def collect_media_files(source_path, include_subfolders, sniff_unknown=True):
+def collect_media_files(source_path, include_subfolders):
     """List media files in the source. Shared by the organizer and the
     preview-cache validation so both always see the same file set.
+
+    Files with an unfamiliar extension are always identified by reading their
+    first bytes. That used to be tied to the "fix wrong extensions" option,
+    which meant turning that option off did not merely leave such files alone
+    - it hid them completely, so they were never sorted, never checked for
+    damage and never deduplicated (STATUS.md #4). Finding a file and deciding
+    what to do about it are different questions, and only the second one is
+    the user's to answer. Sniffing costs 16 bytes.
 
     Returns (regular_media_files, raw_files).
     """
@@ -935,11 +978,10 @@ def collect_media_files(source_path, include_subfolders, sniff_unknown=True):
     regular = [f for f in all_files
                if f.suffix.lower() in (IMAGE_EXTS | VIDEO_EXTS)]
 
-    if sniff_unknown:
-        known = ALL_MEDIA_EXTS | NON_MEDIA_EXTS
-        regular.extend(f for f in all_files
-                       if f.suffix.lower() not in known
-                       and looks_like_media_by_content(f))
+    known = ALL_MEDIA_EXTS | NON_MEDIA_EXTS
+    regular.extend(f for f in all_files
+                   if f.suffix.lower() not in known
+                   and looks_like_media_by_content(f))
     return regular, raw_files
 
 
@@ -992,10 +1034,13 @@ class MediaFile:
     # can it be trusted - exactly what file_health() said
     verdict: str = 'unchecked'             # ok | damaged | misnamed | unchecked
     verdict_reason: str = ''
+    extension: str = 'ok'                  # ok | harmless | breaking
+    canonical_ext: str = None              # what the name should have been
 
     # what the run decided
     duplicate_of: Path = None
     content_hash: bytes = None
+    capture_id: str = ''                   # files from one shutter press
     action: str = ''                       # organize | duplicate | corrupt |
                                            # wrong_extension | skipped
     target: Path = None
@@ -1063,6 +1108,91 @@ def get_target_folder(source_path, file_path, camera_model, photo_date,
     return target_folder
 
 
+def _kind_of(path):
+    """Whether a file is a photo or a video.
+
+    The extension answers this for almost everything. When it does not -
+    Google Takeout truncates long filenames and chops the extension clean
+    off - the bytes are asked instead, which is how the file came to be
+    noticed at all. Deciding this from the name alone would leave a stripped
+    motion-photo clip classified as a photo.
+    """
+    suffix = path.suffix.lower()
+    if suffix in VIDEO_EXTS:
+        return 'video'
+    if suffix in IMAGE_EXTS:
+        return 'image'
+    canonical = probe_file(path)[2]
+    return 'video' if canonical in VIDEO_EXTS else 'image'
+
+
+def index_sidecars(paths):
+    """Map each directory to the JSON sidecars in it, listing each one once.
+
+    Takeout truncates long filenames - sometimes part-way through
+    ".supplemental-metadata" - so a sidecar cannot be found by guessing an
+    exact name. One listing per directory is both reliable and far cheaper
+    than probing candidate names per file.
+    """
+    index = {}
+    for directory in {p.parent for p in paths}:
+        try:
+            index[directory] = [n for n in os.listdir(directory)
+                                if n.lower().endswith('.json')]
+        except OSError:
+            index[directory] = []
+    return index
+
+
+def find_sidecar(media_path, sidecar_index):
+    """The JSON sidecar belonging to a media file, or None."""
+    names = sidecar_index.get(media_path.parent, ())
+    prefix = media_path.name.lower() + '.'
+    for name in names:
+        if name.lower().startswith(prefix):
+            return media_path.parent / name       # IMG_1.jpg.<anything>.json
+    stem = media_path.stem.lower() + '.json'
+    for name in names:
+        if name.lower() == stem:
+            return media_path.parent / name       # IMG_1.json beside IMG_1.jpg
+    return None
+
+
+def read_sidecar_date(sidecar_path):
+    """When Google Photos says the photo was taken.
+
+    Takeout strips or omits EXIF inconsistently, and for the files it strips,
+    this JSON is the only surviving record of when the photo was taken. With
+    no EXIF and no sidecar the organizer falls back to the file's modified
+    time - which on a Takeout export is when it was *extracted*, so those
+    photos get filed under the year of the download rather than the year they
+    happened. On a large export that is thousands of files in the wrong place.
+
+    photoTakenTime is preferred over creationTime, which is the upload time
+    and can be years later. Returns a datetime, or None. Never raises.
+    """
+    try:
+        with open(sidecar_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+    except (OSError, ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    for key in ('photoTakenTime', 'creationTime'):
+        entry = data.get(key)
+        stamp = entry.get('timestamp') if isinstance(entry, dict) else None
+        if not stamp:
+            continue
+        try:
+            dt = datetime.fromtimestamp(int(stamp))
+        except (ValueError, OSError, OverflowError):
+            continue
+        # Same sanity window the video-header reader uses
+        if 1990 <= dt.year <= datetime.now().year + 1:
+            return dt
+    return None
+
+
 def _scan_files(paths, settings, progress, p0=0, p1=25):
     """Read every file once and return {path: MediaFile}.
 
@@ -1076,6 +1206,9 @@ def _scan_files(paths, settings, progress, p0=0, p1=25):
     if total == 0:
         return records
 
+    # Listed once up front so the scan threads only ever read it
+    sidecars = index_sidecars(paths)
+
     def note_progress(done):
         progress.percent(p0 + int(done / total * (p1 - p0)))
         progress.status(f"Reading metadata {done}/{total}")
@@ -1087,16 +1220,26 @@ def _scan_files(paths, settings, progress, p0=0, p1=25):
         except OSError:
             pass
         if is_raw_file(path):
-            mf.kind = 'raw'
-            return mf              # RAW metadata is never read directly
-        mf.kind = 'video' if is_video_file(path) else 'image'
-        meta = read_media_metadata(path)
-        if mf.kind == 'image':
-            mf.camera_model = model_for_image(path, meta)
-            mf.is_screenshot = looks_like_screenshot(path, meta)
-        if meta.get('date'):
-            mf.captured_at = meta['date']
-            mf.date_source = 'video' if mf.kind == 'video' else 'exif'
+            mf.kind = 'raw'        # RAW metadata is never read directly
+        else:
+            mf.kind = _kind_of(path)
+            meta = read_media_metadata(path)
+            if mf.kind == 'image':
+                mf.camera_model = model_for_image(path, meta)
+                mf.is_screenshot = looks_like_screenshot(path, meta)
+            if meta.get('date'):
+                mf.captured_at = meta['date']
+                mf.date_source = 'video' if mf.kind == 'video' else 'exif'
+
+        # The file's own metadata is always believed first; a sidecar only
+        # answers when the file itself cannot.
+        if mf.captured_at is None:
+            sidecar = find_sidecar(path, sidecars)
+            if sidecar is not None:
+                taken = read_sidecar_date(sidecar)
+                if taken is not None:
+                    mf.captured_at = taken
+                    mf.date_source = 'sidecar'
         return mf
 
     if settings.use_multithreading and total > 1:
@@ -1124,6 +1267,13 @@ def _scan_files(paths, settings, progress, p0=0, p1=25):
                 note_progress(done)
 
     return records
+
+
+def _note_extension(mf):
+    """Record what the file really is and how far its name is from the truth."""
+    real_format, valid_exts, canonical = probe_file(mf.path)
+    mf.canonical_ext = canonical
+    mf.extension = extension_verdict(mf.path, real_format, valid_exts, canonical)
 
 
 def _check_health(records, settings, progress, p0=25, p1=40):
@@ -1163,6 +1313,7 @@ def _check_health(records, settings, progress, p0=25, p1=40):
                     mf.verdict, mf.verdict_reason = future.result()
                 except Exception as e:
                     mf.verdict, mf.verdict_reason = 'damaged', f"check failed ({e})"
+                _note_extension(mf)
                 note()
     else:
         for mf in values:
@@ -1170,6 +1321,7 @@ def _check_health(records, settings, progress, p0=25, p1=40):
                 break
             mf.verdict, mf.verdict_reason = file_health(mf.path, thorough,
                                                         format_only)
+            _note_extension(mf)
             note()
 
 
@@ -1226,6 +1378,138 @@ def _keeper_rank(mf):
     # Final entries are pure tie-breakers so repeated runs agree
     return (health_rank, richness, looks_copied, len(mf.path.stem), mtime,
             str(mf.path).lower())
+
+
+def capture_key(path):
+    """The capture a file belongs to: its folder, plus the photo name it
+    shares with its variants.
+
+    Deliberately scoped to one folder. Two folders can easily both hold an
+    IMG_1234.jpg from different years, and treating those as one capture
+    would hand a photo the wrong date - a false positive of exactly the kind
+    this application exists to avoid. A capture split across folders is
+    simply not found, which is the safe way to be wrong.
+    """
+    return f"{path.parent}|{media_base_name(path)}"
+
+
+def _group_captures(records):
+    """Group the files that came from one press of the shutter.
+
+    A RAW and the JPEG it was taken with, a photo and its motion clip, the
+    frames of a burst - Google and the camera makers all express this by
+    giving the files a shared photo name and tacking a tag on the end, which
+    media_base_name() already knows how to strip.
+    """
+    captures = {}
+    for mf in records.values():
+        mf.capture_id = capture_key(mf.path)
+        captures.setdefault(mf.capture_id, []).append(mf)
+    return captures
+
+
+# How much a date is worth trusting, best first. A file's own EXIF beats what
+# Google recorded about it, which beats a video container's header.
+_DATE_TRUST = {'exif': 0, 'sidecar': 1, 'video': 2}
+
+
+def _share_capture_dates(captures, progress):
+    """Give every member of a capture the date of its best-evidenced member.
+
+    A RAW carries no date this application will read, so it used to fall back
+    to the file's modified time and land in a different year folder from the
+    JPEG it was taken with - the test suite asserted that split as correct
+    behaviour. One shutter press belongs in one place.
+
+    Nothing is invented. A file that has its own date keeps it, and a capture
+    where nothing has a date stays without one and falls back to the file time
+    exactly as before. This also settles STATUS.md #2: a RAW with no surviving
+    JPEG has no capture siblings, so it inherits nothing and stays honestly
+    unidentified rather than being assumed into the folder of the others.
+    """
+    shared = 0
+    for members in captures.values():
+        if len(members) < 2:
+            continue
+        dated = [m for m in members
+                 if m.captured_at is not None and m.date_source in _DATE_TRUST]
+        if not dated:
+            continue
+        primary = min(dated, key=lambda m: (_DATE_TRUST[m.date_source],
+                                            str(m.path).lower()))
+        for mf in members:
+            if mf.captured_at is None:
+                mf.captured_at = primary.captured_at
+                mf.date_source = 'capture'
+                shared += 1
+    if shared:
+        progress.log(f"  🔗 {shared} file(s) took their date from the photo "
+                     f"they were captured with")
+    return shared
+
+
+def _hash_tail(path, length):
+    """Hash the last `length` bytes of a file."""
+    h = hashlib.blake2b()
+    with open(path, 'rb') as f:
+        f.seek(-length, os.SEEK_END)
+        remaining = length
+        while remaining > 0:
+            chunk = f.read(min(1 << 20, remaining))
+            if not chunk:
+                break
+            h.update(chunk)
+            remaining -= len(chunk)
+    return h.digest()
+
+
+def _find_embedded_clips(captures, progress):
+    """Find video files that are already sitting inside a photo.
+
+    A motion photo is one file: a complete JPEG with a short MP4 welded onto
+    the back. Google Takeout also writes that MP4 out a second time as its own
+    file, and truncation usually strips its extension - so the same bytes are
+    stored twice. In a real 3,322-file export, 14 files were exactly this and
+    nothing else was (GOOGLE_TAKEOUT_NOTES.md).
+
+    Matched by content, never by name: the clip qualifies only when its bytes
+    sit, byte for byte, at the very end of a photo it was captured with.
+    Takeout's naming has changed before, Samsung does the same thing under
+    different names, and the bytes are the only thing that cannot be wrong. A
+    real video cannot qualify by accident - it would have to already be inside
+    one of your photos, which only happens when it genuinely is a spare copy.
+
+    Costs nothing on an archive that has none: a clip is only compared against
+    photos from its own capture that are larger than it is.
+    """
+    groups = []
+    for members in captures.values():
+        if len(members) < 2:
+            continue
+        clips = [m for m in members
+                 if m.kind == 'video' and m.duplicate_of is None and m.size > 0]
+        if not clips:
+            continue
+        hosts = [m for m in members if m.kind == 'image']
+        for clip in clips:
+            for host in hosts:
+                if host.size <= clip.size or host.duplicate_of is not None:
+                    continue
+                try:
+                    if _hash_tail(host.path, clip.size) != _hash_file(clip.path):
+                        continue
+                except OSError:
+                    continue
+                clip.duplicate_of = host.path
+                clip.reason = (f"already stored inside "
+                               f"{host.path.name} - the motion plays from "
+                               f"inside the photo, not from this copy")
+                groups.append((host, [clip]))
+                break
+    if groups:
+        progress.log(f"  🎞️ {len(groups)} clip(s) are already stored inside the "
+                     f"photo they belong to - the separate copy is redundant")
+    return groups
 
 
 def _find_duplicates(records, settings, progress, p0=40, p1=60):
@@ -1358,7 +1642,7 @@ def write_manifest(manifest_path, records, source_path):
     columns = ['original_path', 'action', 'target_path', 'reason', 'size_bytes',
                'content_hash', 'kind', 'camera_model', 'captured_at',
                'date_source', 'is_screenshot', 'verdict', 'verdict_reason',
-               'duplicate_of']
+               'extension', 'duplicate_of', 'capture_id']
     try:
         with open(manifest_path, 'w', encoding='utf-8', newline='') as f:
             writer = csv.writer(f)
@@ -1377,7 +1661,8 @@ def write_manifest(manifest_path, records, source_path):
                     mf.kind, mf.camera_model or '',
                     mf.captured_at.isoformat(' ') if mf.captured_at else '',
                     mf.date_source, 'yes' if mf.is_screenshot else 'no',
-                    mf.verdict, mf.verdict_reason, rel(mf.duplicate_of),
+                    mf.verdict, mf.verdict_reason, mf.extension,
+                    rel(mf.duplicate_of), mf.capture_id,
                 ])
     except OSError:
         pass
@@ -1505,8 +1790,7 @@ def organize_photos(settings, progress, dry_run=True):
     # ---- SCAN ------------------------------------------------------------
     try:
         regular_media_files, raw_files = collect_media_files(
-            source_path, settings.include_subfolders,
-            sniff_unknown=settings.fix_extensions)
+            source_path, settings.include_subfolders)
     except OSError as e:
         progress.log(f"❌ Could not read source folder: {e}")
         progress.status("Error reading source folder")
@@ -1556,10 +1840,15 @@ def organize_photos(settings, progress, dry_run=True):
             progress.log(f"  {stats['misnamed']} file(s) have an extension "
                          f"that doesn't match their contents")
 
+    # Files from one shutter press belong together, and share a date
+    captures = _group_captures(records)
+    _share_capture_dates(captures, progress)
+
     duplicate_groups = []
     if settings.dedupe_content:
         progress.log("\n♻️ Looking for duplicate files by content...")
         duplicate_groups = _find_duplicates(records, settings, progress)
+        duplicate_groups += _find_embedded_clips(captures, progress)
         if progress.cancelled:
             progress.log("\n⏹️ Operation cancelled by user")
             progress.status("Cancelled")
@@ -1587,8 +1876,7 @@ def organize_photos(settings, progress, dry_run=True):
     log_path = source_path / log_filename
     undo_path = source_path / f"kjegla_undo_{run_stamp}.jsonl"
 
-    ctx = SimpleNamespace(planned={}, ops=[], stats=stats,
-                          progress=progress)
+    ctx = SimpleNamespace(planned={}, ops=[], stats=stats, progress=progress)
 
     if duplicate_groups:
         report_name = f"kjegla_duplicates_{run_stamp}.txt"
@@ -1880,9 +2168,11 @@ def _plan_one_file(mf, source_path, settings, base_name_to_model, ctx,
     # that also happens to be damaged is still just a duplicate, and its
     # keeper is guaranteed to be the healthier copy.
     if mf.duplicate_of is not None:
+        twin = mf.duplicate_of.relative_to(source_path)
+        # An embedded clip already explained itself when it was found
+        reason = mf.reason or f"identical to {twin}"
         _plan_set_aside(mf, source_path, DUPLICATES_FOLDER, 'duplicate',
-                        f"identical to {mf.duplicate_of.relative_to(source_path)}",
-                        ctx, settings, dry_run, log_file)
+                        reason, ctx, settings, dry_run, log_file)
         return
 
     if settings.check_corrupt and mf.verdict == 'damaged':
@@ -1892,8 +2182,8 @@ def _plan_one_file(mf, source_path, settings, base_name_to_model, ctx,
         return
 
     if settings.fix_extensions and mf.verdict == 'misnamed':
-        new_ext = canonical_extension_for(file_path)
-        new_name = (file_path.stem + new_ext) if new_ext else None
+        new_name = ((file_path.stem + mf.canonical_ext)
+                    if mf.canonical_ext else None)
         _plan_set_aside(mf, source_path, WRONG_EXT_FOLDER, 'wrong_extension',
                         f"wrong file extension - {mf.verdict_reason}",
                         ctx, settings, dry_run, log_file, new_name=new_name)
@@ -2122,8 +2412,7 @@ def execute_cached_plan(plan, settings, progress):
     progress.status("Verifying folder is unchanged since preview...")
     try:
         regular, raw = collect_media_files(
-            source_path, settings.include_subfolders,
-            sniff_unknown=settings.fix_extensions)
+            source_path, settings.include_subfolders)
     except OSError as e:
         progress.log(f"❌ Could not read source folder: {e}")
         return None
@@ -2228,8 +2517,7 @@ def run_health_check(settings, progress):
 
     try:
         regular, raw = collect_media_files(source_path,
-                                           settings.include_subfolders,
-                                           sniff_unknown=True)
+                                           settings.include_subfolders)
     except OSError as e:
         progress.log(f"❌ Could not read source folder: {e}")
         progress.status("Error reading source folder")
