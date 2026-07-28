@@ -19,8 +19,13 @@ All five V35 features are implemented and covered by the test suite:
 | Empty-folder sweep | Bottom-up across the whole source tree. Only genuinely empty folders; no file is ever deleted |
 | Wrong extensions | Renamed to the correct extension and set aside in `Wrong Extension/`, with its own **↩️ Undo Renames** button |
 
-**218 automated checks pass** (headless tkinter, real temporary folders,
-generated fixture files).
+**218 automated checks pass.** They drive the real app with its window hidden,
+against real generated files in a temporary folder - so what is tested is what
+ships, not a stripped-down copy of the logic:
+
+```bash
+python tests/test_photo_organizer.py
+```
 
 Tested against two real photo collections, not just fixtures - which is what
 caught four separate classes of false positive that the fixtures missed

@@ -149,6 +149,16 @@ A log file (`kjegla_media_log_*.txt`) is written into the source folder for
 every run, so you can always see what happened. Duplicate and damage reports
 (`kjegla_duplicates_*.txt`, `kjegla_health_*.txt`) land there too.
 
+## Running the tests
+
+```bash
+python tests/test_photo_organizer.py
+```
+
+218 checks. They create real photos and videos in a temporary folder and drive
+the actual app with its window hidden, then assert where every file ended up -
+so a passing run means the real thing works, not a simplified copy of it.
+
 ## Building the .exe yourself
 
 ```bash
