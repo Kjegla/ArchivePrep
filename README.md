@@ -152,12 +152,26 @@ every run, so you can always see what happened. Duplicate and damage reports
 ## Running the tests
 
 ```bash
-python tests/test_photo_organizer.py
+pip3 install -r requirements-dev.txt
+python -m pytest tests/ -q
 ```
 
-218 checks. They create real photos and videos in a temporary folder and drive
-the actual app with its window hidden, then assert where every file ended up -
-so a passing run means the real thing works, not a simplified copy of it.
+77 tests, 262 checks. They create real photos and videos in a temporary folder
+and drive the actual app with its window hidden, then assert where every file
+ended up - so a passing run means the real thing works, not a simplified copy
+of it.
+
+Every test starts from a clean folder, so you can run just the one you care
+about instead of the whole suite:
+
+```bash
+python -m pytest tests/ -q -k undo
+```
+
+`tests/test_golden_corpus.py` holds the awkward real files - motion photos,
+iPhone Portrait shots, zero-padded recoveries, Takeout's truncated names -
+each with the verdict it has to get and a note on why it is in the list.
+Most of them are there because a real photo was once judged wrongly.
 
 ## Building the .exe yourself
 

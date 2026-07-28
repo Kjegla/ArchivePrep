@@ -1,0 +1,4 @@
+# Test-only. The application itself still needs nothing beyond
+# requirements.txt - keep it that way.
+-r requirements.txt
+pytest>=8.0
