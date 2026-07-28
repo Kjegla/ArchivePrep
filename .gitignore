@@ -3,5 +3,9 @@ __pycache__/
 build/
 dist/
 *.spec
+
+# Local history of the standalone versioned scripts (v22 - v35) that predate
+# this repo being the single source. Not part of the project.
+versions/
 kjegla_media_log_*.txt
 kjegla_undo_*.json*
