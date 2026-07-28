@@ -841,7 +841,7 @@ def extension_verdict(file_path, real_format, valid_exts, canonical):
     return 'breaking'
 
 
-def file_health(file_path, thorough=False, format_only=False):
+def file_health(file_path, thorough=False, format_only=False, probe=None):
     """Check whether a media file is intact.
 
     Returns (status, reason) where status is:
@@ -865,7 +865,9 @@ def file_health(file_path, thorough=False, format_only=False):
 
     # Before anything else: does the file's own header agree with its
     # extension? Checking a JPEG as if it were a video reports nonsense.
-    real_format, valid_exts, canonical = probe_file(file_path)
+    # A caller that has already read the header can pass it in rather than
+    # make us read it again.
+    real_format, valid_exts, canonical = probe or probe_file(file_path)
     if real_format and suffix not in valid_exts:
         named = suffix.lstrip('.').upper() or "(no extension)"
         return 'misnamed', (f"contents are a {real_format}, not a {named} "
@@ -1034,6 +1036,11 @@ class MediaFile:
     # can it be trusted - exactly what file_health() said
     verdict: str = 'unchecked'             # ok | damaged | misnamed | unchecked
     verdict_reason: str = ''
+    # Invariant: verdict == 'misnamed' exactly when extension != 'ok'. They
+    # are the same fact at two levels of detail - verdict is what routes the
+    # file, extension is how much the wrong name actually costs the user.
+    # Both come off one probe in _inspect(); if you change the condition in
+    # one, change it in the other.
     extension: str = 'ok'                  # ok | harmless | breaking
     canonical_ext: str = None              # what the name should have been
 
@@ -1058,8 +1065,9 @@ class Operation:
     target: Path
     kind: str                              # organize | duplicate | corrupt |
                                            # wrong_extension
+    # Carried per operation rather than read from settings, so APPLY needs no
+    # settings at all - it does exactly what the plan says and nothing else.
     operation: str = 'move'                # move | copy
-    reason: str = ''
 
 
 def _empty_stats():
@@ -1269,11 +1277,20 @@ def _scan_files(paths, settings, progress, p0=0, p1=25):
     return records
 
 
-def _note_extension(mf):
-    """Record what the file really is and how far its name is from the truth."""
-    real_format, valid_exts, canonical = probe_file(mf.path)
-    mf.canonical_ext = canonical
-    mf.extension = extension_verdict(mf.path, real_format, valid_exts, canonical)
+def _inspect(path, thorough, format_only):
+    """Everything one read of a file's header can tell us, in one go.
+
+    Is it intact, what is it really, and how far is its name from the truth -
+    three questions off the same 16 bytes. They used to be asked separately,
+    which meant reading the header twice per file, and the second read
+    happened back on the main thread inside a phase whose whole purpose is
+    to do this work in parallel.
+
+    Returns (verdict, reason, canonical_extension, extension_verdict).
+    """
+    probe = probe_file(path)
+    verdict, reason = file_health(path, thorough, format_only, probe=probe)
+    return verdict, reason, probe[2], extension_verdict(path, *probe)
 
 
 def _check_health(records, settings, progress, p0=25, p1=40):
@@ -1299,10 +1316,14 @@ def _check_health(records, settings, progress, p0=25, p1=40):
             progress.status(f"{label} {done[0]}/{total}")
             last_note[0] = now
 
+    def store(mf, result):
+        (mf.verdict, mf.verdict_reason, mf.canonical_ext,
+         mf.extension) = result
+
     values = list(records.values())
     if settings.use_multithreading and total > 1:
         with ThreadPoolExecutor(max_workers=settings.max_threads) as executor:
-            futures = {executor.submit(file_health, mf.path, thorough,
+            futures = {executor.submit(_inspect, mf.path, thorough,
                                        format_only): mf for mf in values}
             for future in as_completed(futures):
                 if progress.cancelled:
@@ -1310,18 +1331,15 @@ def _check_health(records, settings, progress, p0=25, p1=40):
                     break
                 mf = futures[future]
                 try:
-                    mf.verdict, mf.verdict_reason = future.result()
+                    store(mf, future.result())
                 except Exception as e:
                     mf.verdict, mf.verdict_reason = 'damaged', f"check failed ({e})"
-                _note_extension(mf)
                 note()
     else:
         for mf in values:
             if progress.cancelled:
                 break
-            mf.verdict, mf.verdict_reason = file_health(mf.path, thorough,
-                                                        format_only)
-            _note_extension(mf)
+            store(mf, _inspect(mf.path, thorough, format_only))
             note()
 
 
@@ -2143,7 +2161,7 @@ def _plan_set_aside(mf, source_path, folder_name, kind, reason, ctx,
     relative_target = target.relative_to(source_path)
     mf.action, mf.target, mf.reason = kind, target, reason
     ctx.ops.append(Operation(source=mf.path, target=target, kind=kind,
-                             operation="move", reason=reason))
+                             operation="move"))
 
     if dry_run:
         ctx.progress.log(f"  🔍 Would move to: {relative_target}")
@@ -2545,6 +2563,13 @@ def run_health_check(settings, progress):
                      key=by_name)
     misnamed = sorted((f for f, (s, _) in health.items() if s == 'misnamed'),
                       key=by_name)
+    # Not all wrong names matter equally, and this report is what gets read
+    # before deciding whether to touch anything. A photo called .MOV is handed
+    # to a video player and simply will not open; a WEBP called .png displays
+    # everywhere and needs nothing done to it. Reporting both as one number
+    # turns a handful of real problems into a pile of things to worry about.
+    breaking = [p for p in misnamed if records[p].extension == 'breaking']
+    harmless = [p for p in misnamed if records[p].extension != 'breaking']
     unchecked = [f for f, (s, _) in health.items() if s == 'unchecked']
     healthy = len(health) - len(damaged) - len(misnamed) - len(unchecked)
     stats['damaged'] = len(damaged)
@@ -2563,7 +2588,9 @@ def run_health_check(settings, progress):
             f.write("=" * 60 + "\n\n")
             f.write(f"Fine: {healthy}\n")
             f.write(f"Damaged: {len(damaged)}\n")
-            f.write(f"Wrong file extension: {len(misnamed)}\n")
+            f.write(f"Wrong file extension: {len(misnamed)} "
+                    f"({len(breaking)} will not open, "
+                    f"{len(harmless)} open anyway)\n")
             f.write(f"Could not be checked: {len(unchecked)}\n\n")
             if damaged:
                 f.write("DAMAGED FILES\n")
@@ -2571,10 +2598,21 @@ def run_health_check(settings, progress):
                     f.write(f"  {path.relative_to(source_path)} - "
                             f"{health[path][1]}\n")
                 f.write("\n")
-            if misnamed:
-                f.write("WRONG FILE EXTENSION (the contents are fine - "
-                        "these are NOT damaged, renaming fixes them)\n")
-                for path in misnamed:
+            if breaking:
+                f.write("WRONG FILE EXTENSION - WILL NOT OPEN (the contents "
+                        "are fine and these are NOT damaged, but the name "
+                        "sends them to the wrong kind of program, so nothing "
+                        "opens them. Renaming fixes it.)\n")
+                for path in breaking:
+                    f.write(f"  {path.relative_to(source_path)} - "
+                            f"{health[path][1]}\n")
+                f.write("\n")
+            if harmless:
+                f.write("WRONG FILE EXTENSION - OPENS ANYWAY (the name is "
+                        "wrong but points at the same kind of media, so "
+                        "viewers display these perfectly well. Nothing here "
+                        "needs doing unless you want the names tidy.)\n")
+                for path in harmless:
                     f.write(f"  {path.relative_to(source_path)} - "
                             f"{health[path][1]}\n")
                 f.write("\n")
@@ -2591,7 +2629,8 @@ def run_health_check(settings, progress):
     progress.log(f"✅ Fine: {healthy}")
     progress.log(f"🩹 Damaged: {len(damaged)}")
     progress.log(f"🏷️ Wrong file extension: {len(misnamed)} "
-             f"(contents are fine - renaming fixes these)")
+             f"- {len(breaking)} will not open at all, "
+             f"{len(harmless)} open fine anyway")
     progress.log(f"❓ Could not be checked: {len(unchecked)} "
              f"(RAW / some video formats - not a sign they are broken)")
 
@@ -2606,15 +2645,21 @@ def run_health_check(settings, progress):
     else:
         progress.log("\n🎉 No damaged files found.")
 
-    if misnamed:
-        progress.log("\nWrong file extension (these are NOT damaged - the "
-                 "contents are fine, the name just lies about the format):")
-        for path in misnamed[:100]:
+    for heading, paths in (
+            ("\nWrong file extension, WILL NOT OPEN (not damaged - the name "
+             "sends them to the wrong kind of program):", breaking),
+            ("\nWrong file extension, but they open anyway (the name is wrong "
+             "and nothing is broken - tidy them only if you want to):",
+             harmless)):
+        if not paths:
+            continue
+        progress.log(heading)
+        for path in paths[:100]:
             progress.log(f"  🏷️ {path.relative_to(source_path)} - "
-                     f"{health[path][1]}")
-        if len(misnamed) > 100:
-            progress.log(f"  ... and {len(misnamed) - 100} more "
-                     f"(the full list is in the report file)")
+                         f"{health[path][1]}")
+        if len(paths) > 100:
+            progress.log(f"  ... and {len(paths) - 100} more "
+                         f"(the full list is in the report file)")
 
     if damaged or misnamed:
         progress.log("\n💡 Tick 'Check files for damage while organizing' to have "

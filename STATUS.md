@@ -78,6 +78,14 @@ second is the user's to answer.
 - **The run log lists decisions, then actions**, rather than interleaving them.
   That is the honest consequence of deciding everything before moving anything.
 
+## Known, and deliberately left alone
+
+`run_health_check` rebuilds a `{path: (verdict, reason)}` dictionary from the
+records it already has, so that the twenty lines of report code below it -
+written before records existed - keep working unchanged. It is one line and it
+is inert. Rewriting report generation carries more regression risk than the
+tidiness is worth, and it was postponed on those grounds rather than missed.
+
 ## Not yet done
 
 - Sidecar dates cover Google Takeout JSON. `.xmp` and `.aae` are not read.

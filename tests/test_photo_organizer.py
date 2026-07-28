@@ -600,6 +600,86 @@ def test_standalone_check_files_is_read_only():
     check("raw.arw" in report_text, "the unchecked RAW is listed separately")
 
 
+def test_each_file_header_is_read_exactly_once_per_check():
+    """A guard the original probe work never had, which is why it regressed.
+
+    Identifying a file, judging whether it is intact, and judging whether its
+    name matches all come off the same 16 bytes. At one point they were asked
+    separately, so every file's header was read twice - and the second read
+    happened back on the main thread, inside the phase whose entire purpose is
+    to do this work in parallel. Nothing failed; it was simply twice the I/O.
+    """
+    for i in range(12):
+        make_img(SCRATCH / f"p{i}.jpg", model="SM-S918B",
+                 date="2023:05:10 14:30:00")
+    records = {p: core.MediaFile(path=p) for p in sorted(SCRATCH.glob("*.jpg"))}
+
+    real_probe = core.probe_file
+    calls = []
+    core.probe_file = lambda path: (calls.append(path), real_probe(path))[1]
+    try:
+        core._check_health(records, make_settings(check_corrupt=True),
+                           core.Progress(), p0=0, p1=100)
+    finally:
+        core.probe_file = real_probe
+
+    check(len(calls) == len(records),
+          f"one header read per file, not one per question "
+          f"(got {len(calls)} for {len(records)} files)")
+    check(all(mf.verdict == 'ok' for mf in records.values()),
+          "...and every file was still judged")
+    check(all(mf.extension == 'ok' for mf in records.values()),
+          "...and its name still checked against its contents")
+
+
+def test_check_files_separates_names_that_break_from_names_that_do_not():
+    """The health check is what gets read before deciding to touch anything,
+    so it has to say which wrong names actually matter.
+
+    A photo saved as .MOV is handed to a video player and will not open. A
+    WEBP saved as .png displays everywhere and needs nothing done to it.
+    Reporting both as one number turns a handful of real problems into a pile
+    of things to worry about.
+    """
+    make_img(SCRATCH / "fine.jpg", model="SM-S918B", date="2023:05:10 14:30:00")
+    # breaking: a photo wearing a video's extension
+    make_img(SCRATCH / "IMG_0607.MOV", model="SM-S918B",
+             date="2023:05:11 09:00:00", color='green', fmt='JPEG')
+    # breaking: Takeout chopped the extension off entirely
+    make_img(SCRATCH / "PXL_20250507_050944066.RAW-01.MP.COVER",
+             model="SM-S918B", date="2023:05:12 09:00:00", color='purple',
+             fmt='JPEG')
+    # harmless: still an image either way, opens fine everywhere
+    (SCRATCH / "web.png").write_bytes(b'RIFF' + struct.pack('<I', 100)
+                                      + b'WEBPVP8 ' + bytes(96))
+
+    stats = core.run_health_check(
+        make_settings(operation="move", check_corrupt=True), core.Progress())
+    check(stats['misnamed'] == 3, f"3 misnamed in total (got {stats['misnamed']})")
+
+    report = list(SCRATCH.glob("kjegla_health_*.txt"))[0].read_text(encoding='utf-8')
+    check("2 will not open" in report,
+          f"the summary counts the ones that matter (got: "
+          f"{[l for l in report.splitlines() if 'Wrong file' in l]})")
+    check("1 open anyway" in report, "...and the ones that do not")
+
+    breaking_block = report.split("WILL NOT OPEN")[1].split("OPENS ANYWAY")[0]
+    check("IMG_0607.MOV" in breaking_block,
+          "a photo named .MOV is listed as one that will not open")
+    check("PXL_20250507_050944066.RAW-01.MP.COVER" in breaking_block,
+          "so is a file whose extension Takeout truncated away")
+    check("web.png" not in breaking_block,
+          "the WEBP is not in that list")
+
+    harmless_block = report.split("OPENS ANYWAY")[1]
+    check("web.png" in harmless_block,
+          f"a WEBP named .png is listed as opening anyway (got {harmless_block[:200]})")
+
+    check(relpaths() == sorted(relpaths()), "the check moved nothing")
+    check((SCRATCH / "IMG_0607.MOV").exists(),
+          "...and left every file exactly where it was")
+
+
 def test_thorough_mode_end_to_end():
     make_img(SCRATCH / "ok1.jpg", model="SM-S918B", date="2023:05:10 14:30:00")
     make_img(SCRATCH / "ok2.png", color='blue', fmt='PNG')
