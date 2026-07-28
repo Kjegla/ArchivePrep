@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """Everything the organizer does, with no user interface attached.
 
 This is the whole application except the window: reading metadata, judging
@@ -13,6 +13,7 @@ run, without a screen.
 import os
 import re
 import copy
+import csv
 import json
 import time
 import shutil
@@ -22,6 +23,7 @@ from pathlib import Path
 from datetime import datetime
 from types import SimpleNamespace
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 
 # Pillow is used for metadata extraction (reads only file headers)
 try:
@@ -882,19 +884,6 @@ def read_media_metadata(file_path):
     return read_metadata(file_path)
 
 
-def is_set_aside(file_path, source_path):
-    """True if a file lives under the Duplicates/ or Corrupt/ folder.
-
-    Those hold files a previous run deliberately put away, so scanning them
-    again would just drag them straight back into the organized folders.
-    """
-    try:
-        first = file_path.relative_to(source_path).parts[0]
-    except (ValueError, IndexError):
-        return False
-    return first.lower() in SET_ASIDE_FOLDERS
-
-
 # Extensions that are definitely not photos, so there is no point opening them
 # to look. Anything else with an unfamiliar extension gets sniffed.
 NON_MEDIA_EXTS = {
@@ -977,6 +966,57 @@ def folder_fingerprint(media_files):
     return fp
 
 
+@dataclass(slots=True)
+class MediaFile:
+    """One file, and everything a run has learned about it.
+
+    This replaces the parallel dictionaries the phases used to hand each other
+    - metadata, health, duplicate_of, sizes - all keyed by Path, each with its
+    own idea of what a missing key meant. Two lookups of the same dictionary
+    in the same function once used different fallbacks; with one record per
+    file that class of mistake cannot be made.
+
+    Deliberately a record and not an object: no methods, no behaviour. The
+    phases are functions that read it and fill it in.
+    """
+    path: Path
+    size: int = 0
+
+    # what it is
+    kind: str = 'image'                    # image | video | raw
+    camera_model: str = None
+    captured_at: datetime = None
+    date_source: str = 'none'              # exif | video | mtime | none
+    is_screenshot: bool = False
+
+    # can it be trusted - exactly what file_health() said
+    verdict: str = 'unchecked'             # ok | damaged | misnamed | unchecked
+    verdict_reason: str = ''
+
+    # what the run decided
+    duplicate_of: Path = None
+    content_hash: bytes = None
+    action: str = ''                       # organize | duplicate | corrupt |
+                                           # wrong_extension | skipped
+    target: Path = None
+    reason: str = ''
+
+
+@dataclass(slots=True)
+class Operation:
+    """One file movement the plan intends - the unit APPLY works in.
+
+    Operations stay flat and independent on purpose: a failure moves one file
+    and poisons nothing else, and undo stays a plain list of reversals.
+    """
+    source: Path
+    target: Path
+    kind: str                              # organize | duplicate | corrupt |
+                                           # wrong_extension
+    operation: str = 'move'                # move | copy
+    reason: str = ''
+
+
 def _empty_stats():
     return {
         'total_files': 0,
@@ -1023,57 +1063,75 @@ def get_target_folder(source_path, file_path, camera_model, photo_date,
     return target_folder
 
 
-def _extract_metadata(files, settings, progress, p0=0, p1=25):
-    """Phase A: read metadata for images and videos (p0-p1%% progress).
+def _scan_files(paths, settings, progress, p0=0, p1=25):
+    """Read every file once and return {path: MediaFile}.
 
-    Returns {Path: meta dict}. Parallelized when multithreading is on.
+    Metadata, the camera model and the screenshot verdict all come from the
+    same read, so they are all decided here. RAW files get no model of their
+    own - they borrow one from the image they were taken with, which cannot
+    be worked out until every image has been seen.
     """
-    metadata = {}
-    total = len(files)
+    records = {}
+    total = len(paths)
     if total == 0:
-        return metadata
+        return records
 
     def note_progress(done):
         progress.percent(p0 + int(done / total * (p1 - p0)))
         progress.status(f"Reading metadata {done}/{total}")
 
+    def scan(path):
+        mf = MediaFile(path=path)
+        try:
+            mf.size = path.stat().st_size
+        except OSError:
+            pass
+        if is_raw_file(path):
+            mf.kind = 'raw'
+            return mf              # RAW metadata is never read directly
+        mf.kind = 'video' if is_video_file(path) else 'image'
+        meta = read_media_metadata(path)
+        if mf.kind == 'image':
+            mf.camera_model = model_for_image(path, meta)
+            mf.is_screenshot = looks_like_screenshot(path, meta)
+        if meta.get('date'):
+            mf.captured_at = meta['date']
+            mf.date_source = 'video' if mf.kind == 'video' else 'exif'
+        return mf
+
     if settings.use_multithreading and total > 1:
         with ThreadPoolExecutor(max_workers=settings.max_threads) as executor:
-            futures = {executor.submit(read_media_metadata, f): f for f in files}
+            futures = {executor.submit(scan, p): p for p in paths}
             done = 0
             for future in as_completed(futures):
                 if progress.cancelled:
                     executor.shutdown(wait=False, cancel_futures=True)
                     break
-                file_path = futures[future]
+                path = futures[future]
                 try:
-                    metadata[file_path] = future.result()
+                    records[path] = future.result()
                 except Exception:
-                    metadata[file_path] = {}
+                    records[path] = MediaFile(path=path)
                 done += 1
                 if done % 25 == 0 or done == total:
                     note_progress(done)
     else:
-        for done, file_path in enumerate(files, start=1):
+        for done, path in enumerate(paths, start=1):
             if progress.cancelled:
                 break
-            metadata[file_path] = read_media_metadata(file_path)
+            records[path] = scan(path)
             if done % 25 == 0 or done == total:
                 note_progress(done)
 
-    return metadata
+    return records
 
 
-def _check_health(files, settings, progress, p0=25, p1=40):
-    """Phase A2: check every file for damage. Returns {Path: (status, reason)}.
-
-    Parallelized when multithreading is on - this is I/O bound, so extra
-    threads help even in quick mode.
-    """
-    health = {}
-    total = len(files)
+def _check_health(records, settings, progress, p0=25, p1=40):
+    """Fill in each record's verdict. Parallel when enabled - it is I/O bound,
+    so extra threads help even in quick mode."""
+    total = len(records)
     if total == 0:
-        return health
+        return
     thorough = settings.corrupt_thorough
     # When only the extension option is on there's no need to pay for the
     # full damage check - stop after identifying what each file really is.
@@ -1081,37 +1139,38 @@ def _check_health(files, settings, progress, p0=25, p1=40):
     label = ("Checking file names" if format_only else
              "Thorough check" if thorough else "Checking files")
     last_note = [0.0]
+    done = [0]
 
-    def note(done):
+    def note():
+        done[0] += 1
         now = time.monotonic()
-        if now - last_note[0] >= 0.2 or done == total:
-            progress.percent(p0 + int(done / total * (p1 - p0)))
-            progress.status(f"{label} {done}/{total}")
+        if now - last_note[0] >= 0.2 or done[0] == total:
+            progress.percent(p0 + int(done[0] / total * (p1 - p0)))
+            progress.status(f"{label} {done[0]}/{total}")
             last_note[0] = now
 
+    values = list(records.values())
     if settings.use_multithreading and total > 1:
         with ThreadPoolExecutor(max_workers=settings.max_threads) as executor:
-            futures = {executor.submit(file_health, f, thorough,
-                                       format_only): f for f in files}
+            futures = {executor.submit(file_health, mf.path, thorough,
+                                       format_only): mf for mf in values}
             for future in as_completed(futures):
                 if progress.cancelled:
                     executor.shutdown(wait=False, cancel_futures=True)
                     break
-                file_path = futures[future]
+                mf = futures[future]
                 try:
-                    health[file_path] = future.result()
+                    mf.verdict, mf.verdict_reason = future.result()
                 except Exception as e:
-                    health[file_path] = ('damaged', f"check failed ({e})")
-                note(len(health))
+                    mf.verdict, mf.verdict_reason = 'damaged', f"check failed ({e})"
+                note()
     else:
-        for file_path in files:
+        for mf in values:
             if progress.cancelled:
                 break
-            health[file_path] = file_health(file_path, thorough,
-                                            format_only)
-            note(len(health))
-
-    return health
+            mf.verdict, mf.verdict_reason = file_health(mf.path, thorough,
+                                                        format_only)
+            note()
 
 
 def _hash_many(paths, hasher, settings, progress, note):
@@ -1150,67 +1209,54 @@ def _hash_many(paths, hasher, settings, progress, note):
     return results
 
 
-def _keeper_rank(path, metadata, health):
+def _keeper_rank(mf):
     """Sort key for choosing which copy of an identical set to keep.
 
-    Lowest wins. Health comes first on purpose: a damaged copy can never
-    be kept over a healthy one.
+    Lowest wins. Health comes first on purpose: a damaged copy can never be
+    kept over a healthy one.
     """
-    status = health.get(path, ('unchecked', ''))[0]
     health_rank = {'ok': 0, 'misnamed': 1, 'unchecked': 1,
-                   'damaged': 2}.get(status, 1)
-
-    meta = metadata.get(path) or {}
-    richness = (0 if meta.get('model') else 1) + (0 if meta.get('date') else 1)
-
-    looks_copied = 1 if looks_like_copy_name(path.stem) else 0
+                   'damaged': 2}.get(mf.verdict, 1)
+    richness = (0 if mf.camera_model else 1) + (0 if mf.captured_at else 1)
+    looks_copied = 1 if looks_like_copy_name(mf.path.stem) else 0
     try:
-        mtime = path.stat().st_mtime
+        mtime = mf.path.stat().st_mtime
     except OSError:
         mtime = float('inf')
     # Final entries are pure tie-breakers so repeated runs agree
-    return (health_rank, richness, looks_copied, len(path.stem), mtime,
-            str(path).lower())
+    return (health_rank, richness, looks_copied, len(mf.path.stem), mtime,
+            str(mf.path).lower())
 
 
-def _find_duplicates(files, metadata, health, settings, progress,
-                     p0=40, p1=60):
-    """Phase A3: find files with byte-for-byte identical content.
+def _find_duplicates(records, settings, progress, p0=40, p1=60):
+    """Mark every file that is byte-for-byte identical to another.
 
-    Three stages, each only touching what the previous one could not rule
-    out:
-      1. group by size - a file with a unique size cannot have a twin and
-         is never read at all
+    Three stages, each only touching what the previous one could not rule out:
+      1. group by size - a file with a unique size cannot have a twin and is
+         never read at all
       2. hash the first 64 KB of same-size files
       3. full content hash, only where the head hashes also matched
-    (Files at or under 64 KB are settled by stage 2 - the head hash
-    already covered the whole file.)
+    (Files at or under 64 KB are settled by stage 2 - the head hash already
+    covered the whole file.)
 
-    Returns (duplicate_of, groups): duplicate_of maps each set-aside file
-    to its keeper; groups is [(keeper, [set-aside...])] for the report.
+    Sets mf.duplicate_of on every copy that will be set aside, and returns
+    [(keeper, [set-aside...])] for the report.
     """
-    # Stage 1
-    sizes = {}
     by_size = {}
-    for f in files:
-        try:
-            size = f.stat().st_size
-        except OSError:
-            continue
-        if size == 0:
+    for mf in records.values():
+        if mf.size == 0:
             continue  # empty files are a damage problem, not a duplicate one
-        sizes[f] = size
-        by_size.setdefault(size, []).append(f)
+        by_size.setdefault(mf.size, []).append(mf)
 
-    candidates = [f for group in by_size.values() if len(group) > 1
-                  for f in group]
+    candidates = [mf for group in by_size.values() if len(group) > 1
+                  for mf in group]
     if not candidates:
         progress.percent(p1)
-        return {}, []
+        return []
 
     progress.log(f"\n♻️ Comparing {len(candidates)} files that share a size "
-             f"with at least one other ({len(files) - len(candidates)} "
-             f"ruled out without reading them)")
+                 f"with at least one other ({len(records) - len(candidates)} "
+                 f"ruled out without reading them)")
 
     # Stage 2: head hashes, using the first 60% of this phase's progress
     mid = p0 + int((p1 - p0) * 0.6)
@@ -1224,24 +1270,29 @@ def _find_duplicates(files, metadata, health, settings, progress,
             progress.status(f"Comparing files {done}/{head_total}")
             last_note[0] = now
 
-    head_hashes = _hash_many(candidates, _hash_head, settings, progress, note_head)
+    by_path = {mf.path: mf for mf in candidates}
+    head_hashes = _hash_many([mf.path for mf in candidates], _hash_head,
+                             settings, progress, note_head)
 
     by_head = {}
-    for f, digest in head_hashes.items():
-        by_head.setdefault((sizes[f], digest), []).append(f)
+    for path, digest in head_hashes.items():
+        mf = by_path[path]
+        by_head.setdefault((mf.size, digest), []).append(mf)
 
     final_groups = []
     need_full = []
-    for (size, _digest), group in by_head.items():
+    for (size, digest), group in by_head.items():
         if len(group) < 2:
             continue
         if size <= HEAD_HASH_BYTES:
-            final_groups.append(group)  # head hash was the whole file
+            for mf in group:
+                mf.content_hash = digest   # the head hash was the whole file
+            final_groups.append(group)
         else:
             need_full.append(group)
 
     # Stage 3: full content hashes
-    full_candidates = [f for group in need_full for f in group]
+    full_candidates = [mf for group in need_full for mf in group]
     full_total = len(full_candidates)
     last_note[0] = 0.0
 
@@ -1249,30 +1300,29 @@ def _find_duplicates(files, metadata, health, settings, progress,
         now = time.monotonic()
         if now - last_note[0] >= 0.2 or done == full_total:
             progress.percent(mid + int(done / full_total * (p1 - mid)))
-            progress.status(f"Verifying possible duplicates "
-                               f"{done}/{full_total}")
+            progress.status(f"Verifying possible duplicates {done}/{full_total}")
             last_note[0] = now
 
-    full_hashes = _hash_many(full_candidates, _hash_file, settings, progress,
-                                  note_full)
+    full_hashes = _hash_many([mf.path for mf in full_candidates], _hash_file,
+                             settings, progress, note_full)
     by_full = {}
-    for f, digest in full_hashes.items():
-        by_full.setdefault((sizes[f], digest), []).append(f)
+    for path, digest in full_hashes.items():
+        mf = by_path[path]
+        mf.content_hash = digest
+        by_full.setdefault((mf.size, digest), []).append(mf)
     final_groups.extend(g for g in by_full.values() if len(g) > 1)
 
     # Pick a keeper per group; everything else gets set aside
-    duplicate_of = {}
     groups = []
     for group in final_groups:
-        ordered = sorted(group,
-                         key=lambda p: _keeper_rank(p, metadata, health))
+        ordered = sorted(group, key=_keeper_rank)
         keeper, rest = ordered[0], ordered[1:]
         for dup in rest:
-            duplicate_of[dup] = keeper
+            dup.duplicate_of = keeper.path
         groups.append((keeper, rest))
 
     progress.percent(p1)
-    return duplicate_of, groups
+    return groups
 
 
 def _write_duplicate_report(report_path, groups, source_path):
@@ -1286,28 +1336,147 @@ def _write_duplicate_report(report_path, groups, source_path):
                     "exactly, byte for byte.\n")
             f.write("=" * 60 + "\n\n")
             for keeper, rest in groups:
-                try:
-                    size_mb = keeper.stat().st_size / (1024 * 1024)
-                except OSError:
-                    size_mb = 0.0
-                f.write(f"KEEP     {keeper.relative_to(source_path)} "
+                size_mb = keeper.size / (1024 * 1024)
+                f.write(f"KEEP     {keeper.path.relative_to(source_path)} "
                         f"({size_mb:.2f} MB)\n")
                 for dup in rest:
-                    f.write(f"  DUP    {dup.relative_to(source_path)}\n")
+                    f.write(f"  DUP    {dup.path.relative_to(source_path)}\n")
                 f.write("\n")
     except OSError:
         pass
 
 
-def organize_photos(settings, progress, dry_run=True):
-    """Organize photos and videos from source folder by camera model.
+def write_manifest(manifest_path, records, source_path):
+    """One row per file: what it was, what was decided, and where it went.
 
-    Runs on a worker thread; must not touch tkinter widgets/variables.
+    This is the run's real deliverable alongside the moved files - the thing
+    to consult when merging the organised batch into an existing archive. The
+    content hash is whatever the duplicate hunt already paid to compute, so
+    it is filled in for files that shared a size with another and blank for
+    the rest; nothing is read a second time just to populate a column.
+    """
+    columns = ['original_path', 'action', 'target_path', 'reason', 'size_bytes',
+               'content_hash', 'kind', 'camera_model', 'captured_at',
+               'date_source', 'is_screenshot', 'verdict', 'verdict_reason',
+               'duplicate_of']
+    try:
+        with open(manifest_path, 'w', encoding='utf-8', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(columns)
+            for mf in sorted(records.values(), key=lambda m: str(m.path).lower()):
+                def rel(p):
+                    if p is None:
+                        return ''
+                    try:
+                        return str(Path(p).relative_to(source_path))
+                    except ValueError:
+                        return str(p)
+                writer.writerow([
+                    rel(mf.path), mf.action, rel(mf.target), mf.reason, mf.size,
+                    mf.content_hash.hex() if mf.content_hash else '',
+                    mf.kind, mf.camera_model or '',
+                    mf.captured_at.isoformat(' ') if mf.captured_at else '',
+                    mf.date_source, 'yes' if mf.is_screenshot else 'no',
+                    mf.verdict, mf.verdict_reason, rel(mf.duplicate_of),
+                ])
+    except OSError:
+        pass
+
+
+def _build_model_index(records):
+    """Map the photo names images were filed under to their camera model, so a
+    RAW or a video can borrow the model of the image it was taken with.
+
+    Built from the records in a fixed order rather than in whatever order the
+    metadata threads happened to finish, so two runs over the same folder
+    always agree - which matters, because the output of a run is compared
+    against an existing archive.
+    """
+    index = {}
+    for mf in sorted(records.values(), key=lambda m: str(m.path).lower()):
+        if mf.kind == 'image' and mf.camera_model:
+            index[mf.path.stem] = mf.camera_model
+            # Also filed under the shared photo name, so a RAW called
+            # "....RAW-02.ORIGINAL.dng" finds "....RAW-01.MP.jpg".
+            # setdefault, so an exact filename match always wins.
+            index.setdefault(media_base_name(mf.path), mf.camera_model)
+    return index
+
+
+def _write_run_summary(progress, log_file, stats, duration):
+    """The end-of-run tally, to the window and to the log file alike."""
+    progress.log("\n" + "=" * 60)
+    progress.log("SUMMARY:")
+    progress.log(f"Total media files: {stats['total_files']}")
+    progress.log(f"Files processed: {stats['processed']}")
+    progress.log(f"Files without metadata: {stats['no_metadata']}")
+    progress.log(f"Screenshots detected: {stats['screenshots']}")
+    if stats['content_duplicates']:
+        wasted = stats['duplicate_bytes'] / (1024 * 1024)
+        progress.log(f"Duplicate copies set aside: {stats['content_duplicates']} "
+                     f"({wasted:.2f} MB) → '{DUPLICATES_FOLDER}' folder")
+    if stats['damaged']:
+        progress.log(f"Damaged files found: {stats['damaged']} "
+                     f"→ '{CORRUPT_FOLDER}' folder")
+    if stats['misnamed']:
+        progress.log(f"Wrongly-named files fixed: {stats['misnamed']} "
+                     f"→ renamed to the right extension and moved to "
+                     f"'{WRONG_EXT_FOLDER}' (their contents were fine)")
+    if stats['unchecked']:
+        progress.log(f"Files that could not be checked: {stats['unchecked']} "
+                     f"(RAW / some video formats)")
+    if stats['duplicates']:
+        progress.log(f"Identical duplicates skipped: {stats['duplicates']}")
+    if stats['already_organized']:
+        progress.log(f"Already organized (untouched): {stats['already_organized']}")
+    progress.log(f"Errors: {stats['errors']}")
+    progress.log(f"Total size: {stats['total_size_mb']:.2f} MB")
+    progress.log(f"Duration: {duration:.1f} seconds")
+
+    log_file.write("\n" + "=" * 60 + "\n")
+    log_file.write("SUMMARY:\n")
+    log_file.write(f"Total files: {stats['total_files']}\n")
+    log_file.write(f"Processed: {stats['processed']}\n")
+    log_file.write(f"No metadata/unknown: {stats['no_metadata']}\n")
+    log_file.write(f"Screenshots detected: {stats['screenshots']}\n")
+    log_file.write(f"Identical duplicates skipped: {stats['duplicates']}\n")
+    log_file.write(f"Duplicate copies set aside: {stats['content_duplicates']}\n")
+    log_file.write(f"Damaged files: {stats['damaged']}\n")
+    log_file.write(f"Wrong file extension: {stats['misnamed']}\n")
+    log_file.write(f"Could not be checked: {stats['unchecked']}\n")
+    log_file.write(f"Empty folders removed: {stats['empty_folders_removed']}\n")
+    log_file.write(f"Already organized: {stats['already_organized']}\n")
+    log_file.write(f"Errors: {stats['errors']}\n")
+    log_file.write(f"Total size: {stats['total_size_mb']:.2f} MB\n")
+    log_file.write(f"Duration: {duration:.1f} seconds\n")
+
+    if stats['by_model']:
+        progress.log("\nFiles per camera model:")
+        log_file.write("\nFiles per camera model:\n")
+        for model, count in sorted(stats['by_model'].items()):
+            progress.log(f"  {model}: {count} files")
+            log_file.write(f"  {model}: {count} files\n")
+
+    if stats['no_metadata'] > 0:
+        progress.log(f"\n📂 Unknown/unmatched files: {stats['no_metadata']} "
+                     f"(moved to 'Unknown Camera' folder)")
+    if stats['screenshots'] > 0:
+        progress.log(f"\n📱 Screenshots separated: {stats['screenshots']} files")
+
+
+def organize_photos(settings, progress, dry_run=True):
+    """SCAN what is there, DECIDE what should happen, then APPLY it.
+
+    A preview stops after DECIDE; a real run carries on into APPLY. Both go
+    down the same path to get there, so what a preview shows is what an
+    execute does - the two used to be separate implementations and had
+    already drifted apart.
+
+    Returns (stats, cached_plan). The plan is only kept for a preview, so
+    Execute can replay it without scanning the folder again.
     """
     start_time = datetime.now()
     source_path = Path(settings.source)
-
-    # Reset statistics
     stats = _empty_stats()
     cached_plan = None
 
@@ -1315,22 +1484,25 @@ def organize_photos(settings, progress, dry_run=True):
     operation_text = "Moving" if operation == "move" else "Copying"
 
     progress.log("=" * 60)
-    progress.log(f"Kjegla's Photo Organizer - {'DRY RUN' if dry_run else operation_text.upper()}")
+    progress.log(f"Kjegla's Photo Organizer - "
+                 f"{'DRY RUN' if dry_run else operation_text.upper()}")
     progress.log(f"Source: {source_path}")
     progress.log(f"Operation: {operation}")
     progress.log(f"Subfolder mode: {settings.subfolder_mode}")
     progress.log(f"Separate RAW files: {'Yes' if settings.separate_raw else 'No'}")
-    progress.log(f"Separate Screenshots: {'Yes' if settings.separate_screenshots else 'No'}")
-    progress.log(f"Include subfolders: {'Yes' if settings.include_subfolders else 'No'}")
+    progress.log(f"Separate Screenshots: "
+                 f"{'Yes' if settings.separate_screenshots else 'No'}")
+    progress.log(f"Include subfolders: "
+                 f"{'Yes' if settings.include_subfolders else 'No'}")
     progress.log(f"Multithreading: {'Yes' if settings.use_multithreading else 'No'}")
     progress.log(f"Find duplicates by content: "
-             f"{'Yes' if settings.dedupe_content else 'No'}")
+                 f"{'Yes' if settings.dedupe_content else 'No'}")
     progress.log(f"Check files for damage: "
-             f"{('Yes (thorough)' if settings.corrupt_thorough else 'Yes') if settings.check_corrupt else 'No'}")
-    progress.log(f"Delete empty folders: "
-             f"{'Yes' if settings.cleanup_empty else 'No'}")
+                 f"{('Yes (thorough)' if settings.corrupt_thorough else 'Yes') if settings.check_corrupt else 'No'}")
+    progress.log(f"Delete empty folders: {'Yes' if settings.cleanup_empty else 'No'}")
     progress.log("=" * 60)
 
+    # ---- SCAN ------------------------------------------------------------
     try:
         regular_media_files, raw_files = collect_media_files(
             source_path, settings.include_subfolders,
@@ -1340,13 +1512,11 @@ def organize_photos(settings, progress, dry_run=True):
         progress.status("Error reading source folder")
         return stats, cached_plan
 
-    # Process regular files first so RAW/video matching can use their models
     media_files = regular_media_files + raw_files
 
     # Snapshot the folder state now; a dry run stores this so Execute can
     # later prove nothing changed since the preview
     fingerprint = folder_fingerprint(media_files) if dry_run else None
-
     stats['total_files'] = len(media_files)
 
     if not media_files:
@@ -1354,111 +1524,76 @@ def organize_photos(settings, progress, dry_run=True):
         progress.status("No media files found")
         return stats, cached_plan
 
-    # Phase A: one metadata read per image/video (parallel if enabled)
     progress.log("\n📋 Reading media metadata...")
-    metadata = _extract_metadata(regular_media_files, settings, progress)
-
+    records = _scan_files(media_files, settings, progress)
     if progress.cancelled:
         progress.log("\n⏹️ Operation cancelled by user")
         progress.status("Cancelled")
         return stats, cached_plan
 
-    # Phase A2: damage check and/or extension check (either can be off)
-    health = {}
     if settings.check_corrupt or settings.fix_extensions:
         if settings.check_corrupt:
             progress.log("\n🩺 Checking files for damage"
-                     f"{' (thorough)' if settings.corrupt_thorough else ''}...")
+                         f"{' (thorough)' if settings.corrupt_thorough else ''}...")
         else:
             progress.log("\n🏷️ Checking whether file extensions match their "
-                     "contents...")
-        health = _check_health(media_files, settings, progress)
+                         "contents...")
+        _check_health(records, settings, progress)
         if progress.cancelled:
             progress.log("\n⏹️ Operation cancelled by user")
             progress.status("Cancelled")
             return stats, cached_plan
-        stats['damaged'] = sum(1 for s, _ in health.values()
-                                    if s == 'damaged')
-        stats['misnamed'] = sum(1 for s, _ in health.values()
-                                     if s == 'misnamed')
-        stats['unchecked'] = sum(1 for s, _ in health.values()
-                                      if s == 'unchecked')
-        fine = (len(health) - stats['damaged']
-                - stats['misnamed'] - stats['unchecked'])
+        verdicts = [mf.verdict for mf in records.values()]
+        stats['damaged'] = verdicts.count('damaged')
+        stats['misnamed'] = verdicts.count('misnamed')
+        stats['unchecked'] = verdicts.count('unchecked')
+        fine = len(verdicts) - stats['damaged'] - stats['misnamed'] - stats['unchecked']
         if settings.check_corrupt:
             progress.log(f"  {stats['damaged']} damaged, "
-                     f"{stats['misnamed']} with the wrong file extension, "
-                     f"{stats['unchecked']} could not be checked, "
-                     f"{fine} fine")
+                         f"{stats['misnamed']} with the wrong file extension, "
+                         f"{stats['unchecked']} could not be checked, {fine} fine")
         else:
             progress.log(f"  {stats['misnamed']} file(s) have an extension "
-                     f"that doesn't match their contents")
+                         f"that doesn't match their contents")
 
-    # Phase A3: content-based duplicate detection (optional)
-    duplicate_of, duplicate_groups = {}, []
+    duplicate_groups = []
     if settings.dedupe_content:
         progress.log("\n♻️ Looking for duplicate files by content...")
-        duplicate_of, duplicate_groups = _find_duplicates(
-            media_files, metadata, health, settings, progress)
+        duplicate_groups = _find_duplicates(records, settings, progress)
         if progress.cancelled:
             progress.log("\n⏹️ Operation cancelled by user")
             progress.status("Cancelled")
             return stats, cached_plan
-        stats['content_duplicates'] = len(duplicate_of)
-        for dup in duplicate_of:
-            try:
-                stats['duplicate_bytes'] += dup.stat().st_size
-            except OSError:
-                pass
+        dups = [mf for mf in records.values() if mf.duplicate_of is not None]
+        stats['content_duplicates'] = len(dups)
+        stats['duplicate_bytes'] = sum(mf.size for mf in dups)
         if duplicate_groups:
             wasted = stats['duplicate_bytes'] / (1024 * 1024)
             progress.log(f"  Found {len(duplicate_groups)} set(s) of identical "
-                     f"files - {len(duplicate_of)} extra copies "
-                     f"({wasted:.2f} MB)")
+                         f"files - {len(dups)} extra copies ({wasted:.2f} MB)")
         else:
             progress.log("  No duplicates found")
     else:
         progress.percent(60)
 
-    # Map base filenames to camera models for RAW/video matching
-    base_name_to_model = {}
-    for file_path, meta in metadata.items():
-        model = model_for_image(file_path, meta)
-        if model:
-            base_name_to_model[file_path.stem] = model
-            # Also filed under the shared photo name, so a RAW called
-            # "....RAW-02.ORIGINAL.dng" finds "....RAW-01.MP.jpg".
-            # setdefault, so an exact filename match always wins.
-            base_name_to_model.setdefault(media_base_name(file_path), model)
-
+    base_name_to_model = _build_model_index(records)
     progress.log(f"Found {len(base_name_to_model)} images with camera metadata")
     progress.log(f"Found {len(raw_files)} RAW files and "
-             f"{sum(1 for f in media_files if is_video_file(f))} video files")
+                 f"{sum(1 for mf in records.values() if mf.kind == 'video')} "
+                 f"video files")
 
-    # Create log file (and matching undo record for real runs)
     run_stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     log_filename = f"kjegla_media_log_{run_stamp}.txt"
     log_path = source_path / log_filename
     undo_path = source_path / f"kjegla_undo_{run_stamp}.jsonl"
 
-    # Per-run context: planned targets make dry-run duplicate renames
-    # accurate; undo_entries feeds undo; plan_ops collects [source, target]
-    # pairs for the preview cache; duplicate_of/health carry the results of
-    # the two analysis phases into the per-file loop; undo_path is the
-    # journal each move is appended to as it happens
-    ctx = SimpleNamespace(planned_targets=set(), undo_entries=[],
-                          plan_ops=[], duplicate_of=duplicate_of,
-                          health=health, rename_entries=[],
-                          stats=stats, progress=progress,
-                          undo_path=undo_path)
-
-    if not dry_run:
-        _journal_start(undo_path, operation, source_path)
+    ctx = SimpleNamespace(planned={}, ops=[], stats=stats,
+                          progress=progress)
 
     if duplicate_groups:
         report_name = f"kjegla_duplicates_{run_stamp}.txt"
-        _write_duplicate_report(source_path / report_name,
-                                     duplicate_groups, source_path)
+        _write_duplicate_report(source_path / report_name, duplicate_groups,
+                                source_path)
         progress.log(f"📄 Duplicate report saved: {report_name}")
 
     with open(log_path, 'w', encoding='utf-8') as log_file:
@@ -1466,165 +1601,96 @@ def organize_photos(settings, progress, dry_run=True):
         log_file.write(f"Source Folder: {source_path}\n")
         log_file.write(f"Mode: {'DRY RUN' if dry_run else operation.upper()}\n")
         log_file.write(f"Subfolder organization: {settings.subfolder_mode}\n")
-        log_file.write(f"Separate RAW files: {'Yes' if settings.separate_raw else 'No'}\n")
-        log_file.write(f"Separate Screenshots: {'Yes' if settings.separate_screenshots else 'No'}\n")
+        log_file.write(f"Separate RAW files: "
+                       f"{'Yes' if settings.separate_raw else 'No'}\n")
+        log_file.write(f"Separate Screenshots: "
+                       f"{'Yes' if settings.separate_screenshots else 'No'}\n")
         log_file.write("=" * 60 + "\n\n")
 
-        total = stats['total_files']
-        last_pct = -1
-        phase_start = time.monotonic()
-        last_status_time = 0.0
-
-        for idx, file_path in enumerate(media_files):
+        # ---- DECIDE ------------------------------------------------------
+        # Files are planned in a fixed order so the numbering of any _1/_2
+        # renames is the same every time the same folder is organized.
+        ordered = [records[p] for p in media_files if p in records]
+        total = len(ordered)
+        for idx, mf in enumerate(ordered):
             if progress.cancelled:
                 progress.log("\n⏹️ Operation cancelled by user")
                 break
-
-            # Phase B occupies 60-100% of the progress bar
-            pct = 60 + int((idx + 1) / total * 40)
-            if pct != last_pct:
-                progress.percent(pct)
-                last_pct = pct
-
-            # Status line with live rate / ETA / error count (throttled)
-            now = time.monotonic()
-            if now - last_status_time >= 0.2 or idx + 1 == total:
-                elapsed = now - phase_start
-                rate = (idx + 1) / elapsed if elapsed > 0 else 0
-                if rate > 0.01 and idx + 1 < total:
-                    remaining = (total - idx - 1) / rate
-                    eta = f"{int(remaining // 60)}:{int(remaining % 60):02d}"
-                else:
-                    eta = "--:--"
-                progress.status(
-                    f"Processing {idx + 1}/{total} • {rate:.0f} files/s "
-                    f"• ETA {eta} • errors {stats['errors']}")
-                last_status_time = now
-
+            if total:
+                progress.percent(60 + int((idx + 1) / total * (0 if dry_run else 20)))
             try:
-                _process_one_file(file_path, source_path, settings,
-                                       base_name_to_model, metadata,
-                                       ctx, operation,
-                                       operation_text, dry_run, log_file)
+                _plan_one_file(mf, source_path, settings, base_name_to_model,
+                               ctx, dry_run, log_file)
             except Exception as e:
-                progress.log(f"\n❌ Error processing {file_path.name}: {e}")
+                progress.log(f"\n❌ Error processing {mf.path.name}: {e}")
                 progress.log("   Skipping this file and continuing...")
-                log_file.write(f"ERROR processing {file_path.name}: {e}\n")
+                log_file.write(f"ERROR processing {mf.path.name}: {e}\n")
                 stats['errors'] += 1
 
-        # Summary
-        duration = (datetime.now() - start_time).total_seconds()
-        stats['duration_seconds'] = duration
-
-        # Every move was journalled as it happened, so there is nothing
-        # left to write - only an empty journal to clear away.
+        # ---- APPLY -------------------------------------------------------
+        undo_entries, rename_entries = [], []
         if not dry_run:
-            if ctx.undo_entries:
+            _journal_start(undo_path, operation, source_path)
+            undo_entries, rename_entries = _apply_plan(
+                ctx.ops, source_path, progress, stats, log_file, undo_path,
+                p0=80, p1=100)
+
+            if undo_entries:
                 progress.notify("undo_available", str(undo_path))
             else:
                 undo_path.unlink(missing_ok=True)
 
-        # Renames get their own undo record, kept inside the folder they
-        # affect, so they can be reversed without unpicking the whole run
-        if not dry_run and ctx.rename_entries:
-            rename_undo = (source_path / WRONG_EXT_FOLDER /
-                           f"kjegla_undo_renames_{run_stamp}.jsonl")
-            _journal_start(rename_undo, "move", source_path)
-            for entry in ctx.rename_entries:
-                _journal_append(rename_undo, entry)
-            progress.notify("rename_undo_available", str(rename_undo))
-            progress.log(f"\n↩️ {len(ctx.rename_entries)} rename(s) can be "
-                     f"undone on their own with 'Undo Renames'.")
+            if rename_entries:
+                rename_undo = (source_path / WRONG_EXT_FOLDER /
+                               f"kjegla_undo_renames_{run_stamp}.jsonl")
+                _journal_start(rename_undo, "move", source_path)
+                for entry in rename_entries:
+                    _journal_append(rename_undo, entry)
+                progress.notify("rename_undo_available", str(rename_undo))
+                progress.log(f"\n↩️ {len(rename_entries)} rename(s) can be "
+                             f"undone on their own with 'Undo Renames'.")
 
-        # After a move, tidy up every folder left empty behind us
-        if not dry_run and operation == "move" and settings.cleanup_empty:
-            removed = _sweep_empty_dirs(source_path, log_file)
-            stats['empty_folders_removed'] = removed
-            if removed:
-                progress.log(f"\n🧹 Removed {removed} empty folder(s)")
+            if operation == "move" and settings.cleanup_empty:
+                removed = _sweep_empty_dirs(source_path, log_file)
+                stats['empty_folders_removed'] = removed
+                if removed:
+                    progress.log(f"\n🧹 Removed {removed} empty folder(s)")
 
-        progress.log("\n" + "=" * 60)
-        progress.log("SUMMARY:")
-        progress.log(f"Total media files: {stats['total_files']}")
-        progress.log(f"Files processed: {stats['processed']}")
-        progress.log(f"Files without metadata: {stats['no_metadata']}")
-        progress.log(f"Screenshots detected: {stats['screenshots']}")
-        if stats['content_duplicates']:
-            wasted = stats['duplicate_bytes'] / (1024 * 1024)
-            progress.log(f"Duplicate copies set aside: "
-                     f"{stats['content_duplicates']} ({wasted:.2f} MB) "
-                     f"→ '{DUPLICATES_FOLDER}' folder")
-        if stats['damaged']:
-            progress.log(f"Damaged files found: {stats['damaged']} "
-                     f"→ '{CORRUPT_FOLDER}' folder")
-        if stats['misnamed']:
-            progress.log(f"Wrongly-named files fixed: {stats['misnamed']} "
-                     f"→ renamed to the right extension and moved to "
-                     f"'{WRONG_EXT_FOLDER}' (their contents were fine)")
-        if stats['unchecked']:
-            progress.log(f"Files that could not be checked: "
-                     f"{stats['unchecked']} (RAW / some video formats)")
-        if stats['duplicates']:
-            progress.log(f"Identical duplicates skipped: {stats['duplicates']}")
-        if stats['already_organized']:
-            progress.log(f"Already organized (untouched): {stats['already_organized']}")
-        progress.log(f"Errors: {stats['errors']}")
-        progress.log(f"Total size: {stats['total_size_mb']:.2f} MB")
-        progress.log(f"Duration: {duration:.1f} seconds")
-
-        log_file.write("\n" + "=" * 60 + "\n")
-        log_file.write("SUMMARY:\n")
-        log_file.write(f"Total files: {stats['total_files']}\n")
-        log_file.write(f"Processed: {stats['processed']}\n")
-        log_file.write(f"No metadata/unknown: {stats['no_metadata']}\n")
-        log_file.write(f"Screenshots detected: {stats['screenshots']}\n")
-        log_file.write(f"Identical duplicates skipped: {stats['duplicates']}\n")
-        log_file.write(f"Duplicate copies set aside: {stats['content_duplicates']}\n")
-        log_file.write(f"Damaged files: {stats['damaged']}\n")
-        log_file.write(f"Wrong file extension: {stats['misnamed']}\n")
-        log_file.write(f"Could not be checked: {stats['unchecked']}\n")
-        log_file.write(f"Empty folders removed: {stats['empty_folders_removed']}\n")
-        log_file.write(f"Already organized: {stats['already_organized']}\n")
-        log_file.write(f"Errors: {stats['errors']}\n")
-        log_file.write(f"Total size: {stats['total_size_mb']:.2f} MB\n")
-        log_file.write(f"Duration: {duration:.1f} seconds\n")
-
-        if stats['by_model']:
-            progress.log("\nFiles per camera model:")
-            log_file.write("\nFiles per camera model:\n")
-            for model, count in sorted(stats['by_model'].items()):
-                progress.log(f"  {model}: {count} files")
-                log_file.write(f"  {model}: {count} files\n")
-
-        if stats['no_metadata'] > 0:
-            progress.log(f"\n📂 Unknown/unmatched files: {stats['no_metadata']} "
-                     f"(moved to 'Unknown Camera' folder)")
-
-        if stats['screenshots'] > 0:
-            progress.log(f"\n📱 Screenshots separated: {stats['screenshots']} files")
-
+        duration = (datetime.now() - start_time).total_seconds()
+        stats['duration_seconds'] = duration
+        _write_run_summary(progress, log_file, stats, duration)
         progress.log(f"\n📄 Log file saved: {log_filename}")
 
-        if dry_run:
-            progress.log("\n⚠️  This was a DRY RUN - no files were actually moved/copied!")
-            if not progress.cancelled:
-                cached_plan = {
-                    'key': plan_key(settings),
-                    'fingerprint': fingerprint,
-                    'ops': ctx.plan_ops,
-                    'stats': copy.deepcopy(stats),
-                }
-                progress.log("⚡ Preview cached - Execute will reuse it "
+    # ---- REPORT ----------------------------------------------------------
+    manifest_name = f"kjegla_manifest_{run_stamp}.csv"
+    write_manifest(source_path / manifest_name, records, source_path)
+    progress.log(f"📄 Manifest saved: {manifest_name}")
+
+    if dry_run:
+        progress.log("\n⚠️  This was a DRY RUN - no files were actually "
+                     "moved/copied!")
+        if not progress.cancelled:
+            cached_plan = {
+                'key': plan_key(settings),
+                'fingerprint': fingerprint,
+                'ops': ctx.ops,
+                'stats': copy.deepcopy(stats),
+            }
+            progress.log("⚡ Preview cached - Execute will reuse it "
                          "without re-scanning (as long as nothing changes).")
-            progress.status("Dry run complete")
-        else:
-            cached_plan = None  # the folder just changed
-            progress.log(f"\n✅ Operation complete! Files were {operation}d successfully.")
-            if ctx.undo_entries:
-                progress.log("↩️ This run can be undone with the 'Undo Last Run' button.")
-            progress.status(f"Operation complete - {stats['processed']} files {operation}d")
+        progress.status("Dry run complete")
+    else:
+        progress.log(f"\n✅ Operation complete! Files were {operation}d "
+                     f"successfully.")
+        if undo_entries:
+            progress.log("↩️ This run can be undone with the 'Undo Last Run' "
+                         "button.")
+        progress.status(f"Operation complete - {stats['processed']} files "
+                        f"{operation}d")
 
     return stats, cached_plan
+
+
 def _journal_start(undo_path, operation, source_path):
     """Open an undo journal and write its header line.
 
@@ -1722,17 +1788,37 @@ def _sweep_empty_dirs(source_root, log_file=None):
     return removed
 
 
-def _set_aside_file(file_path, source_path, folder_name, reason,
-                    ctx, settings, dry_run, log_file, new_name=None):
-    """Move a duplicate, damaged or misnamed file into its set-aside folder.
+def _claimed(ctx, path):
+    """True if something is already at `path`, or is planned to land there."""
+    return path.exists() or str(path).lower() in ctx.planned
 
-    The original folder structure is mirrored inside Duplicates/, Corrupt/
-    or Wrong Extension/, so anything can be put back by hand. Nothing is
-    ever deleted, and because this is an ordinary move it lands in the undo
-    record too. `new_name` renames the file on the way (used to give a
-    misnamed file the extension it should have had).
+
+def _same_as_whatever_lands_at(ctx, candidate, path):
+    """True if `candidate` is byte-for-byte the file that will occupy `path`.
+
+    That may be a file already sitting there, or one an earlier operation in
+    this same plan is about to put there. The second case matters because
+    planning now happens before anything moves: two identical files in
+    different folders both aim at the same destination, and the second must
+    still be recognised as a duplicate rather than renamed to _1. The old
+    loop moved as it went and so saw this for free.
     """
-    rel = file_path.relative_to(source_path)
+    if path.exists() and files_identical(candidate, path):
+        return True
+    incoming = ctx.planned.get(str(path).lower())
+    return incoming is not None and files_identical(candidate, incoming)
+
+
+def _plan_set_aside(mf, source_path, folder_name, kind, reason, ctx,
+                    settings, dry_run, log_file, new_name=None):
+    """Decide to put a duplicate, damaged or misnamed file aside.
+
+    The original folder structure is mirrored inside Duplicates/, Corrupt/ or
+    Wrong Extension/, so anything can be put back by hand. Nothing is ever
+    deleted. `new_name` renames the file on the way (used to give a misnamed
+    file the extension it should have had).
+    """
+    rel = mf.path.relative_to(source_path)
     icon = {DUPLICATES_FOLDER: "♻️", CORRUPT_FOLDER: "🩹",
             WRONG_EXT_FOLDER: "🏷️"}.get(folder_name, "📦")
 
@@ -1744,216 +1830,291 @@ def _set_aside_file(file_path, source_path, folder_name, reason,
         ctx.progress.log("  ⏭️ Left where it is (copy mode never touches the source)")
         log_file.write(f"{folder_name}: {rel} - {reason} "
                        f"(copy mode, not copied)\n")
+        mf.action, mf.reason = 'skipped', reason
         return
 
     target = source_path / folder_name / rel
-    if new_name and new_name != file_path.name:
+    if new_name and new_name != mf.path.name:
         target = target.with_name(new_name)
 
-    def claimed(path):
-        return path.exists() or str(path).lower() in ctx.planned_targets
-
-    if claimed(target):
-        if target.exists() and files_identical(file_path, target):
+    if _claimed(ctx, target):
+        if _same_as_whatever_lands_at(ctx, mf.path, target):
             ctx.progress.log(f"\n{icon} {rel}: already set aside in "
-                     f"{folder_name}/, leaving it alone")
+                             f"{folder_name}/, leaving it alone")
             log_file.write(f"{folder_name}: {rel} already present - skipped\n")
+            mf.action, mf.reason = 'skipped', "already set aside"
             return
         base = target
         counter = 1
-        while claimed(target):
+        while _claimed(ctx, target):
             target = base.parent / f"{base.stem}_{counter}{base.suffix}"
             counter += 1
-    ctx.planned_targets.add(str(target).lower())
+    ctx.planned[str(target).lower()] = mf.path
 
     ctx.progress.log(f"\n{icon} {rel}: {reason}")
     relative_target = target.relative_to(source_path)
+    mf.action, mf.target, mf.reason = kind, target, reason
+    ctx.ops.append(Operation(source=mf.path, target=target, kind=kind,
+                             operation="move", reason=reason))
 
     if dry_run:
-        ctx.plan_ops.append([str(file_path), str(target)])
         ctx.progress.log(f"  🔍 Would move to: {relative_target}")
         log_file.write(f"{folder_name}: would move {rel} -> "
                        f"{relative_target}\n")
-        return
-
-    target.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        transfer_file(file_path, target, "move")
-        ctx.undo_entries.append([str(target), str(file_path)])
-        _journal_append(ctx.undo_path, [str(target), str(file_path)])
-        if folder_name == WRONG_EXT_FOLDER:
-            # These also get their own undo record, so the renames can be
-            # reversed on their own without touching the rest of the run
-            ctx.rename_entries.append([str(target), str(file_path)])
-        ctx.progress.log(f"  ➡️ Moved to: {relative_target}")
-        log_file.write(f"{folder_name}: {rel} -> {relative_target}\n")
-    except Exception as e:
-        ctx.progress.log(f"  ❌ Could not set aside: {e}")
-        log_file.write(f"ERROR setting aside {rel}: {e}\n")
-        ctx.stats['errors'] += 1
 
 
-def _process_one_file(file_path, source_path, settings, base_name_to_model,
-                      metadata, ctx, operation, operation_text,
-                      dry_run, log_file):
-    """Classify one file, compute its target, and move/copy (or preview) it."""
-    meta = metadata.get(file_path)
+def _plan_one_file(mf, source_path, settings, base_name_to_model, ctx,
+                   dry_run, log_file):
+    """Decide what should happen to one file.
+
+    Reads the filesystem freely; writes nothing. Everything it concludes goes
+    onto the record and, when a file is to be moved, onto ctx.ops. `dry_run`
+    reaches this far for one reason only - the wording of the log line. The
+    decisions themselves are identical either way, which is precisely the
+    point: a preview and a real run now go down the same path.
+    """
+    file_path = mf.path
 
     # Files the analysis phases flagged go to a set-aside folder instead of
     # into the organized folders. Duplicates are checked first: a duplicate
     # that also happens to be damaged is still just a duplicate, and its
     # keeper is guaranteed to be the healthier copy.
-    keeper = ctx.duplicate_of.get(file_path)
-    if keeper is not None:
-        _set_aside_file(
-            file_path, source_path, DUPLICATES_FOLDER,
-            f"identical to {keeper.relative_to(source_path)}",
-            ctx, settings, dry_run, log_file)
+    if mf.duplicate_of is not None:
+        _plan_set_aside(mf, source_path, DUPLICATES_FOLDER, 'duplicate',
+                        f"identical to {mf.duplicate_of.relative_to(source_path)}",
+                        ctx, settings, dry_run, log_file)
         return
 
-    if settings.check_corrupt:
-        status, reason = ctx.health.get(file_path, ('unchecked', ''))
-        if status == 'damaged':
-            _set_aside_file(file_path, source_path, CORRUPT_FOLDER,
-                                 f"damaged - {reason}",
-                                 ctx, settings, dry_run, log_file)
-            return
-    if settings.fix_extensions:
-        status, reason = ctx.health.get(file_path, ('ok', ''))
-        if status == 'misnamed':
-            new_ext = canonical_extension_for(file_path)
-            new_name = (file_path.stem + new_ext) if new_ext else None
-            _set_aside_file(file_path, source_path, WRONG_EXT_FOLDER,
-                                 f"wrong file extension - {reason}",
-                                 ctx, settings, dry_run, log_file,
-                                 new_name=new_name)
-            return
+    if settings.check_corrupt and mf.verdict == 'damaged':
+        _plan_set_aside(mf, source_path, CORRUPT_FOLDER, 'corrupt',
+                        f"damaged - {mf.verdict_reason}",
+                        ctx, settings, dry_run, log_file)
+        return
 
-    # Classify the file and determine its camera model
-    camera_model = None
-    is_screenshot = False
+    if settings.fix_extensions and mf.verdict == 'misnamed':
+        new_ext = canonical_extension_for(file_path)
+        new_name = (file_path.stem + new_ext) if new_ext else None
+        _plan_set_aside(mf, source_path, WRONG_EXT_FOLDER, 'wrong_extension',
+                        f"wrong file extension - {mf.verdict_reason}",
+                        ctx, settings, dry_run, log_file, new_name=new_name)
+        return
+
+    # Which camera took it. RAW and video borrow the model of the image they
+    # were taken with; only images carry their own.
     match_note = None
-
-    if is_raw_file(file_path):
+    if mf.kind == 'raw':
         file_type = "📸 RAW"
-        # RAW metadata is never read directly - match to a sibling image
-        camera_model = lookup_model(base_name_to_model, file_path)
-        if camera_model:
-            match_note = f"  🔗 Matched RAW to JPEG: {camera_model}"
+        mf.camera_model = lookup_model(base_name_to_model, file_path)
+        if mf.camera_model:
+            match_note = f"  🔗 Matched RAW to JPEG: {mf.camera_model}"
         else:
-            camera_model = camera_from_filename(file_path)
-            match_note = (f"  🏷️  No matching JPEG; filename says {camera_model}"
-                          if camera_model else
+            mf.camera_model = camera_from_filename(file_path)
+            match_note = (f"  🏷️  No matching JPEG; filename says {mf.camera_model}"
+                          if mf.camera_model else
                           "  ⚠️  No matching JPEG for RAW, will move to Unknown")
-    elif is_video_file(file_path):
+    elif mf.kind == 'video':
         file_type = "🎬 Video"
-        camera_model = lookup_model(base_name_to_model, file_path)
-        if camera_model:
-            match_note = f"  🔗 Matched video to image: {camera_model}"
+        mf.camera_model = lookup_model(base_name_to_model, file_path)
+        if mf.camera_model:
+            match_note = f"  🔗 Matched video to image: {mf.camera_model}"
         else:
-            camera_model = camera_from_filename(file_path)
-            match_note = (f"  🏷️  No matching image; filename says {camera_model}"
-                          if camera_model else
+            mf.camera_model = camera_from_filename(file_path)
+            match_note = (f"  🏷️  No matching image; filename says {mf.camera_model}"
+                          if mf.camera_model else
                           "  ⚠️  No matching image for video, will move to Unknown")
     else:
         file_type = "📷 Image"
-        camera_model = model_for_image(file_path, meta)
-        if (camera_model == "iPhone" and file_path.suffix.lower() in HEIC_EXTS
-                and not (meta and meta.get('model'))):
+        if (mf.camera_model == "iPhone"
+                and file_path.suffix.lower() in HEIC_EXTS
+                and mf.date_source != 'exif'):
             match_note = "  📱 HEIC format, assuming iPhone"
-        if settings.separate_screenshots and looks_like_screenshot(file_path, meta):
-            is_screenshot = True
-            file_type += " (Screenshot)"
+
+    separate_shot = settings.separate_screenshots and mf.is_screenshot
+    if separate_shot:
+        file_type += " (Screenshot)"
 
     # Date: metadata (EXIF / video header) if available, else modified time
-    photo_date = meta.get('date') if meta else None
-    if photo_date is None:
-        photo_date = datetime.fromtimestamp(file_path.stat().st_mtime)
+    if mf.captured_at is None:
+        mf.captured_at = datetime.fromtimestamp(file_path.stat().st_mtime)
+        mf.date_source = 'mtime'
 
-    target_folder = get_target_folder(source_path, file_path, camera_model,
-                                           photo_date, settings, is_screenshot)
+    target_folder = get_target_folder(source_path, file_path, mf.camera_model,
+                                      mf.captured_at, settings, separate_shot)
     target_path = target_folder / file_path.name
 
     # Recursive re-runs: files already in their correct spot are untouched
     if target_path == file_path:
         ctx.progress.log(f"\n✔️ Already organized: "
-                 f"{file_path.relative_to(source_path)}")
+                         f"{file_path.relative_to(source_path)}")
         log_file.write(f"Already organized - skipped: {file_path.name}\n")
         ctx.stats['already_organized'] += 1
+        mf.action, mf.reason = 'skipped', "already organized"
         return
 
-    file_size_mb = file_path.stat().st_size / (1024 * 1024)
+    file_size_mb = mf.size / (1024 * 1024)
     ctx.stats['total_size_mb'] += file_size_mb
 
-    ctx.progress.log(f"\n{file_type} Processing: {file_path.name} ({file_size_mb:.2f} MB)")
+    ctx.progress.log(f"\n{file_type} Processing: {file_path.name} "
+                     f"({file_size_mb:.2f} MB)")
     log_file.write(f"Processing: {file_path.name}\n")
     if match_note:
         ctx.progress.log(match_note)
-    if is_screenshot:
+    if separate_shot:
         ctx.stats['screenshots'] += 1
 
     # Update statistics
-    ctx.stats['by_year'][str(photo_date.year)] = \
-        ctx.stats['by_year'].get(str(photo_date.year), 0) + 1
-    if camera_model:
-        ctx.stats['by_model'][camera_model] = \
-            ctx.stats['by_model'].get(camera_model, 0) + 1
+    ctx.stats['by_year'][str(mf.captured_at.year)] = \
+        ctx.stats['by_year'].get(str(mf.captured_at.year), 0) + 1
+    if mf.camera_model:
+        ctx.stats['by_model'][mf.camera_model] = \
+            ctx.stats['by_model'].get(mf.camera_model, 0) + 1
     else:
         ctx.stats['no_metadata'] += 1
 
-    # Handle duplicates. Name collisions with identical content are
-    # skipped entirely; different content gets a _1/_2 rename.
-    # (ctx.planned_targets makes dry-run renames accurate.)
-    def claimed(path):
-        return path.exists() or str(path).lower() in ctx.planned_targets
-
-    if claimed(target_path):
-        if target_path.exists() and files_identical(file_path, target_path):
-            ctx.progress.log(f"  ♻️ Identical file already at destination, skipping"
-                     f"{' (left in source)' if operation == 'move' and not dry_run else ''}")
+    # Name collisions with identical content are skipped entirely; different
+    # content gets a _1/_2 rename. planned_targets keeps the numbering right
+    # even though nothing has been moved yet.
+    if _claimed(ctx, target_path):
+        if _same_as_whatever_lands_at(ctx, file_path, target_path):
+            ctx.progress.log("  ♻️ Identical file already at destination, skipping"
+                             f"{' (left in source)' if settings.operation == 'move' else ''}")
             log_file.write("  Identical duplicate - skipped\n")
             ctx.stats['duplicates'] += 1
+            mf.action, mf.reason = 'skipped', "identical file already at destination"
             return
         counter = 1
-        while claimed(target_path):
+        while _claimed(ctx, target_path):
             target_path = target_folder / f"{file_path.stem}_{counter}{file_path.suffix}"
             counter += 1
-            if target_path.exists() and files_identical(file_path, target_path):
+            if _same_as_whatever_lands_at(ctx, file_path, target_path):
                 ctx.progress.log("  ♻️ Identical file already at destination, skipping")
                 log_file.write("  Identical duplicate - skipped\n")
                 ctx.stats['duplicates'] += 1
+                mf.action, mf.reason = 'skipped', "identical file already at destination"
                 return
         ctx.progress.log(f"  🔄 Duplicate found, will rename to: {target_path.name}")
-    ctx.planned_targets.add(str(target_path).lower())
+    ctx.planned[str(target_path).lower()] = file_path
 
-    if not dry_run:
-        target_folder.mkdir(parents=True, exist_ok=True)
-        try:
-            transfer_file(file_path, target_path, operation)
-            ctx.undo_entries.append([str(target_path), str(file_path)])
-            _journal_append(ctx.undo_path,
-                                 [str(target_path), str(file_path)])
-            relative_path = target_path.relative_to(source_path)
-            ctx.progress.log(f"  ✅ {operation_text} to: {relative_path}")
-            log_file.write(f"  {operation_text} to: {relative_path}\n")
-            ctx.stats['processed'] += 1
-        except Exception as e:
-            ctx.progress.log(f"  ❌ File operation error: {e}")
-            log_file.write(f"  FILE OPERATION ERROR: {e}\n")
-            ctx.stats['errors'] += 1
-    else:
-        ctx.plan_ops.append([str(file_path), str(target_path)])
+    mf.action, mf.target = 'organize', target_path
+    ctx.ops.append(Operation(source=file_path, target=target_path,
+                             kind='organize', operation=settings.operation))
+
+    if dry_run:
         relative_path = target_path.relative_to(source_path)
-        ctx.progress.log(f"  🔍 Would {operation} to: {relative_path}")
-        log_file.write(f"  Would {operation} to: {relative_path}\n")
+        ctx.progress.log(f"  🔍 Would {settings.operation} to: {relative_path}")
+        log_file.write(f"  Would {settings.operation} to: {relative_path}\n")
         ctx.stats['processed'] += 1
 
 
-def execute_cached_plan(plan, settings, progress):
-    """Execute a cached preview plan without re-analyzing anything.
+def _apply_plan(ops, source_path, progress, stats, log_file, undo_path,
+                p0=60, p1=100):
+    """Carry out a plan. The only code in the application that moves a file.
 
-    Returns True if the plan ran; False if the folder no longer matches
-    the preview fingerprint (caller then runs a fresh full analysis).
+    Preview and Execute run exactly the same decisions and then either stop
+    here or come through here - which is what stops the two drifting apart.
+    They used to be separate engines, and had already grown different
+    collision handling.
+
+    Returns (undo_entries, rename_entries).
+    """
+    undo_entries, rename_entries = [], []
+    total = len(ops)
+    if not total:
+        progress.percent(p1)
+        return undo_entries, rename_entries
+
+    operation_text = {"move": "Moving", "copy": "Copying"}
+    phase_start = time.monotonic()
+    last_status_time = 0.0
+    last_pct = -1
+
+    for idx, op in enumerate(ops):
+        if progress.cancelled:
+            progress.log("\n⏹️ Operation cancelled by user")
+            break
+
+        pct = p0 + int((idx + 1) / total * (p1 - p0))
+        if pct != last_pct:
+            progress.percent(pct)
+            last_pct = pct
+        now = time.monotonic()
+        if now - last_status_time >= 0.2 or idx + 1 == total:
+            elapsed = now - phase_start
+            rate = (idx + 1) / elapsed if elapsed > 0 else 0
+            if rate > 0.01 and idx + 1 < total:
+                remaining = (total - idx - 1) / rate
+                eta = f"{int(remaining // 60)}:{int(remaining % 60):02d}"
+            else:
+                eta = "--:--"
+            progress.status(f"Processing {idx + 1}/{total} • {rate:.0f} files/s "
+                            f"• ETA {eta} • errors {stats['errors']}")
+            last_status_time = now
+
+        source, target = op.source, op.target
+        try:
+            if not source.exists():
+                raise FileNotFoundError("source file vanished")
+            # The plan was made against a snapshot. If the destination has
+            # been taken since, step aside rather than overwrite - unless it
+            # is the very same file, in which case there is nothing to do.
+            if target.exists():
+                if files_identical(source, target):
+                    progress.log(f"  ♻️ {source.name}: identical file already "
+                                 f"at destination, skipping")
+                    log_file.write(f"  Identical duplicate - skipped: {source}\n")
+                    stats['duplicates'] += 1
+                    continue
+                base = target
+                counter = 1
+                while target.exists():
+                    target = base.parent / f"{base.stem}_{counter}{base.suffix}"
+                    counter += 1
+                progress.log(f"  🔄 {base.name}: destination taken, "
+                             f"renaming to {target.name}")
+
+            target.parent.mkdir(parents=True, exist_ok=True)
+            # Journalled *before* the move, not after. If the process dies in
+            # between, undo finds an entry for a move that never happened,
+            # reports "missing, cannot restore" and leaves the file exactly
+            # where it already is - harmless. The other order leaves a file
+            # moved with no undo entry, which is a file the tool can no longer
+            # put back. A spurious entry is always the cheaper mistake.
+            _journal_append(undo_path, [str(target), str(source)])
+            transfer_file(source, target, op.operation)
+            undo_entries.append([str(target), str(source)])
+            if op.kind == 'wrong_extension':
+                # These also get their own undo record, so the renames can be
+                # reversed on their own without touching the rest of the run
+                rename_entries.append([str(target), str(source)])
+            relative = target.relative_to(source_path)
+            # Names the file as well as the destination: deciding and doing
+            # are separate passes now, so the action lines are no longer
+            # sitting directly under the "Processing X" line they belong to.
+            progress.log(f"  ✅ {operation_text[op.operation]} {source.name} "
+                         f"→ {relative}")
+            log_file.write(f"  {operation_text[op.operation]} {source.name} "
+                           f"-> {relative}\n")
+            stats['processed'] += 1
+        except Exception as e:
+            progress.log(f"  ❌ {source.name}: {e}")
+            log_file.write(f"  FILE OPERATION ERROR {source}: {e}\n")
+            stats['errors'] += 1
+
+    progress.percent(p1)
+    return undo_entries, rename_entries
+
+
+def execute_cached_plan(plan, settings, progress):
+    """Carry out a plan a preview already worked out, without scanning again.
+
+    Returns the run statistics, or None if the folder no longer matches the
+    fingerprint taken during the preview - in which case the caller falls
+    back to a fresh run rather than acting on a stale plan.
+
+    This is deliberately thin. It used to be a second execution engine, with
+    its own collision handling that had already diverged from the real one;
+    now it verifies the folder and hands the same operations to the same
+    applier.
     """
     source_path = Path(settings.source)
     start_time = datetime.now()
@@ -1968,7 +2129,7 @@ def execute_cached_plan(plan, settings, progress):
         return None
     if folder_fingerprint(regular + raw) != plan['fingerprint']:
         progress.log("⚠️ Folder changed since the preview - "
-                 "running a fresh analysis instead.")
+                     "running a fresh analysis instead.")
         return None
 
     ops = plan['ops']
@@ -1983,20 +2144,14 @@ def execute_cached_plan(plan, settings, progress):
     run_stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     log_filename = f"kjegla_media_log_{run_stamp}.txt"
     undo_path = source_path / f"kjegla_undo_{run_stamp}.jsonl"
-    _journal_start(undo_path, operation, source_path)
 
     progress.log("=" * 60)
-    progress.log(f"Kjegla's Photo Organizer - {operation_text.upper()} (cached preview)")
+    progress.log(f"Kjegla's Photo Organizer - {operation_text.upper()} "
+                 f"(cached preview)")
     progress.log(f"Source: {source_path}")
     progress.log(f"⚡ Folder unchanged since preview - executing "
-             f"{len(ops)} planned operation(s) directly")
+                 f"{len(ops)} planned operation(s) directly")
     progress.log("=" * 60)
-
-    undo_entries = []
-    total = len(ops)
-    phase_start = time.monotonic()
-    last_status_time = 0.0
-    last_pct = -1
 
     with open(source_path / log_filename, 'w', encoding='utf-8') as log_file:
         log_file.write(f"Kjegla's Media Organization Log - {datetime.now()}\n")
@@ -2004,60 +2159,22 @@ def execute_cached_plan(plan, settings, progress):
         log_file.write(f"Mode: {operation.upper()} (cached preview replay)\n")
         log_file.write("=" * 60 + "\n\n")
 
-        for idx, (src, dst) in enumerate(ops):
-            if progress.cancelled:
-                progress.log("\n⏹️ Operation cancelled by user")
-                break
-
-            pct = int((idx + 1) / total * 100) if total else 100
-            if pct != last_pct:
-                progress.percent(pct)
-                last_pct = pct
-            now = time.monotonic()
-            if now - last_status_time >= 0.2 or idx + 1 == total:
-                elapsed = now - phase_start
-                rate = (idx + 1) / elapsed if elapsed > 0 else 0
-                if rate > 0.01 and idx + 1 < total:
-                    remaining = (total - idx - 1) / rate
-                    eta = f"{int(remaining // 60)}:{int(remaining % 60):02d}"
-                else:
-                    eta = "--:--"
-                progress.status(
-                    f"Processing {idx + 1}/{total} • {rate:.0f} files/s "
-                    f"• ETA {eta} • errors {stats['errors']}")
-                last_status_time = now
-
-            src_p, dst_p = Path(src), Path(dst)
-            try:
-                if not src_p.exists():
-                    raise FileNotFoundError("source file vanished")
-                # The fingerprint doesn't cover target folders on flat
-                # scans, so re-check the landing spot and dodge if taken
-                if dst_p.exists():
-                    base = dst_p
-                    counter = 1
-                    while dst_p.exists():
-                        dst_p = base.parent / f"{base.stem}_{counter}{base.suffix}"
-                        counter += 1
-                    progress.log(f"  🔄 {base.name}: destination taken, "
-                             f"renaming to {dst_p.name}")
-                dst_p.parent.mkdir(parents=True, exist_ok=True)
-                transfer_file(src_p, dst_p, operation)
-                undo_entries.append([str(dst_p), str(src_p)])
-                _journal_append(undo_path, [str(dst_p), str(src_p)])
-                relative = dst_p.relative_to(source_path)
-                progress.log(f"  ✅ {operation_text}: {src_p.name} → {relative}")
-                log_file.write(f"{operation_text}: {src} -> {dst_p}\n")
-                stats['processed'] += 1
-            except Exception as e:
-                progress.log(f"  ❌ {src_p.name}: {e}")
-                log_file.write(f"ERROR {src}: {e}\n")
-                stats['errors'] += 1
+        _journal_start(undo_path, operation, source_path)
+        undo_entries, rename_entries = _apply_plan(
+            ops, source_path, progress, stats, log_file, undo_path, p0=0, p1=100)
 
         if undo_entries:
             progress.notify("undo_available", str(undo_path))
         else:
             undo_path.unlink(missing_ok=True)
+
+        if rename_entries:
+            rename_undo = (source_path / WRONG_EXT_FOLDER /
+                           f"kjegla_undo_renames_{run_stamp}.jsonl")
+            _journal_start(rename_undo, "move", source_path)
+            for entry in rename_entries:
+                _journal_append(rename_undo, entry)
+            progress.notify("rename_undo_available", str(rename_undo))
 
         if operation == "move" and settings.cleanup_empty:
             removed = _sweep_empty_dirs(source_path, log_file)
@@ -2073,17 +2190,18 @@ def execute_cached_plan(plan, settings, progress):
         progress.log(f"Files processed: {stats['processed']}")
         progress.log(f"Errors: {stats['errors']}")
         progress.log(f"Duration: {duration:.1f} seconds "
-                 f"(analysis skipped - cached preview)")
+                     f"(analysis skipped - cached preview)")
         log_file.write(f"\nSUMMARY: processed {stats['processed']}, "
                        f"errors {stats['errors']}, {duration:.1f}s\n")
         progress.log(f"\n📄 Log file saved: {log_filename}")
-        progress.log(f"\n✅ Operation complete! Files were {operation}d successfully.")
+        progress.log(f"\n✅ Operation complete! Files were {operation}d "
+                     f"successfully.")
         if undo_entries:
-            progress.log("↩️ This run can be undone with the 'Undo Last Run' button.")
-        progress.status(
-            f"Operation complete - {stats['processed']} files {operation}d")
+            progress.log("↩️ This run can be undone with the 'Undo Last Run' "
+                         "button.")
+        progress.status(f"Operation complete - {stats['processed']} files "
+                        f"{operation}d")
 
-    cached_plan = None
     return stats
 
 
@@ -2125,7 +2243,9 @@ def run_health_check(settings, progress):
         return stats
 
     progress.log(f"\n🩺 Checking {len(media_files)} file(s)...")
-    health = _check_health(media_files, settings, progress, p0=0, p1=100)
+    records = {p: MediaFile(path=p) for p in media_files}
+    _check_health(records, settings, progress, p0=0, p1=100)
+    health = {mf.path: (mf.verdict, mf.verdict_reason) for mf in records.values()}
 
     if progress.cancelled:
         progress.log("\n⏹️ Check cancelled by user")

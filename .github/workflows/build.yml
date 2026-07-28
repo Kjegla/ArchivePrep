@@ -10,7 +10,23 @@ permissions:
   contents: write
 
 jobs:
+  # The core imports no tkinter, so almost the whole suite runs anywhere.
+  # Only the handful of window-wiring tests need a display, and those run on
+  # the Windows job below.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+      - name: Run the suite (everything that needs no screen)
+        run: python -m pytest tests/ -q -m "not gui"
+
   build-windows:
+    needs: [test]
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
@@ -18,7 +34,9 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install dependencies
-        run: pip install -r requirements.txt pyinstaller
+        run: pip install -r requirements-dev.txt pyinstaller
+      - name: Run the full suite, including the window-wiring tests
+        run: python -m pytest tests/ -q
       - name: Build exe
         run: python -m PyInstaller --onefile --windowed --noconfirm --collect-all sv_ttk --name PhotoOrganizer photo_organizer.py
       - name: Rename artifact
@@ -29,6 +47,7 @@ jobs:
           path: dist/PhotoOrganizer-Windows.exe
 
   build-macos:
+    needs: [test]
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7

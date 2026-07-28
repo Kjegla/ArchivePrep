@@ -1,4 +1,4 @@
-﻿"""The golden corpus: byte patterns a real archive actually contains.
+"""The golden corpus: byte patterns a real archive actually contains.
 
 Every entry is a file shape that ``file_health()`` must return a specific
 verdict for. Most of them exist because a real photo was once judged wrongly:

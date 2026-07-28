@@ -1,4 +1,4 @@
-﻿"""End-to-end tests for organizer_core.py - the whole application except the
+"""End-to-end tests for organizer_core.py - the whole application except the
 window.
 
     python -m pytest tests/ -q
@@ -230,25 +230,26 @@ def test_copy_name_detection():
 
 
 def test_keeper_ranking():
-    p_good = SCRATCH / "a.jpg"
-    p_good.write_bytes(b"x")
-    p_bad = SCRATCH / "b.jpg"
-    p_bad.write_bytes(b"x")
+    def record(name, **fields):
+        path = SCRATCH / name
+        path.write_bytes(b"x")
+        return core.MediaFile(path=path, **fields)
+
     rank = core._keeper_rank
-    health = {p_good: ('ok', ''), p_bad: ('damaged', 'truncated')}
-    check(rank(p_good, {}, health) < rank(p_bad, {}, health),
+    healthy = record("a.jpg", verdict='ok')
+    damaged = record("b.jpg", verdict='damaged', verdict_reason='truncated')
+    check(rank(healthy) < rank(damaged),
           "a healthy copy always outranks a damaged one")
-    meta = {p_good: {'model': 'X', 'date': datetime.now()}, p_bad: {}}
-    check(rank(p_good, meta, {}) < rank(p_bad, meta, {}),
+
+    rich = record("c.jpg", camera_model='X', captured_at=datetime.now())
+    bare = record("d.jpg")
+    check(rank(rich) < rank(bare),
           "a copy with camera info and a date outranks one with neither")
-    p_orig = SCRATCH / "IMG_1.jpg"
-    p_orig.write_bytes(b"x")
-    p_copy = SCRATCH / "IMG_1 (1).jpg"
-    p_copy.write_bytes(b"x")
-    check(rank(p_orig, {}, {}) < rank(p_copy, {}, {}),
-          "a clean filename outranks a '(1)' one")
-    check(rank(p_orig, {}, {}) == rank(p_orig, {}, {}),
-          "ranking is stable for the same file")
+
+    original = record("IMG_1.jpg")
+    copied = record("IMG_1 (1).jpg")
+    check(rank(original) < rank(copied), "a clean filename outranks a '(1)' one")
+    check(rank(original) == rank(original), "ranking is stable for the same file")
 
 
 def test_empty_folder_sweep():
@@ -642,6 +643,53 @@ def test_undo_journal_is_append_only_and_survives_a_torn_tail():
           f"undo restored every file the journal still held (got {len(restored)})")
 
 
+def test_a_move_is_journalled_before_it_is_made():
+    """Order matters here, and it is not the obvious one.
+
+    Journalling after the move leaves a window - however small - where a file
+    has moved and nothing records it, which is a file the tool can no longer
+    put back. Journalling first means a crash in that window leaves an entry
+    for a move that never happened, and undo simply reports it as missing and
+    moves on. A spurious entry is always the cheaper mistake.
+
+    Proven here by making the move itself fail: the journal entry must still
+    be there afterwards.
+    """
+    make_img(SCRATCH / "fine.jpg", model="SM-S918B", date="2023:05:10 14:30:00")
+    make_img(SCRATCH / "doomed.jpg", model="SM-S918B", date="2023:05:11 09:00:00",
+             color='green')
+
+    real_transfer = core.transfer_file
+
+    def fail_on_doomed(src, dst, operation):
+        if src.name == "doomed.jpg":
+            raise OSError("simulated failure part-way through the move")
+        return real_transfer(src, dst, operation)
+
+    core.transfer_file = fail_on_doomed
+    try:
+        stats = run_app(dry_run=False, operation="move")
+    finally:
+        core.transfer_file = real_transfer
+
+    check(stats['errors'] == 1, f"the failed move was counted (got {stats['errors']})")
+    check((SCRATCH / "doomed.jpg").exists(),
+          "the file that failed to move is still exactly where it was")
+
+    journal = sorted(SCRATCH.glob("kjegla_undo_*.jsonl"))[-1]
+    record = core.read_undo(journal)
+    origins = [Path(origin).name for _target, origin in record['entries']]
+    check("doomed.jpg" in origins,
+          f"the move was journalled before it was attempted (got {origins})")
+
+    # And undo copes with the entry describing something that never happened
+    run_undo(journal, record)
+    check((SCRATCH / "doomed.jpg").exists(),
+          "undo left the un-moved file alone rather than damaging it")
+    check((SCRATCH / "fine.jpg").exists(),
+          "...and still restored the file that really did move")
+
+
 def test_undo_record_from_an_older_build_still_works():
     (SCRATCH / "Old Camera").mkdir()
     (SCRATCH / "Old Camera" / "moved.jpg").write_bytes(b"the photo")
@@ -683,6 +731,131 @@ def test_copy_mode_undo_never_deletes_an_edited_copy():
     check(not kept_copy.exists(), "the untouched copy was removed as normal")
     check((SCRATCH / "keep.jpg").exists() and (SCRATCH / "edited.jpg").exists(),
           "copy mode left both originals alone throughout")
+
+
+def test_preview_and_a_fresh_execute_agree_on_every_file():
+    """The defect this exists to prevent: preview and execute used to be two
+    separate implementations, and had already grown different collision
+    handling - a preview would say "identical file already there, skipping"
+    where the execute made a _1 copy instead. They now share one decision
+    pass, so the plan a preview shows must be the plan an execute carries out,
+    file for file.
+
+    The awkward cases are deliberately in the fixture: two identical files
+    aimed at one destination, and two different files aimed at one destination.
+    """
+    (SCRATCH / "a").mkdir()
+    (SCRATCH / "b").mkdir()
+    make_img(SCRATCH / "a" / "dup.jpg", model="SM-S918B", date="2023:05:10 14:30:00")
+    shutil.copy2(SCRATCH / "a" / "dup.jpg", SCRATCH / "b" / "dup.jpg")
+    make_img(SCRATCH / "a" / "diff.jpg", model="SM-S918B", date="2023:05:10 14:30:00")
+    make_img(SCRATCH / "b" / "diff.jpg", model="SM-S918B", date="2023:05:10 14:30:00",
+             color='green')
+    settings = make_settings(operation="move", include_subfolders=True)
+
+    before = relpaths()
+    _stats, plan = core.organize_photos(settings, core.Progress(), dry_run=True)
+    previewed = sorted((str(op.source), str(op.target)) for op in plan['ops'])
+    check(relpaths() == before, "the preview moved nothing")
+    check(previewed, "the preview planned something")
+
+    core.organize_photos(settings, core.Progress(), dry_run=False)
+    journal = sorted(SCRATCH.glob("kjegla_undo_*.jsonl"))[-1]
+    executed = sorted((origin, target)
+                      for target, origin in core.read_undo(journal)['entries'])
+    check(previewed == executed,
+          f"a fresh execute did exactly what the preview said\n"
+          f"  previewed: {previewed}\n  executed:  {executed}")
+
+
+def test_preview_and_a_cached_replay_agree_on_every_file():
+    """Same guarantee for the other path: replaying a cached preview must land
+    every file exactly where the preview said, not merely somewhere sensible."""
+    (SCRATCH / "a").mkdir()
+    (SCRATCH / "b").mkdir()
+    make_img(SCRATCH / "a" / "dup.jpg", model="SM-S918B", date="2023:05:10 14:30:00")
+    shutil.copy2(SCRATCH / "a" / "dup.jpg", SCRATCH / "b" / "dup.jpg")
+    make_img(SCRATCH / "a" / "diff.jpg", model="SM-S918B", date="2023:05:10 14:30:00")
+    make_img(SCRATCH / "b" / "diff.jpg", model="SM-S918B", date="2023:05:10 14:30:00",
+             color='green')
+    settings = make_settings(operation="move", include_subfolders=True)
+
+    _stats, plan = core.organize_photos(settings, core.Progress(), dry_run=True)
+    previewed = sorted((str(op.source), str(op.target)) for op in plan['ops'])
+
+    stats = core.execute_cached_plan(plan, settings, core.Progress())
+    check(stats is not None, "the replay ran")
+    journal = sorted(SCRATCH.glob("kjegla_undo_*.jsonl"))[-1]
+    executed = sorted((origin, target)
+                      for target, origin in core.read_undo(journal)['entries'])
+    check(previewed == executed,
+          f"the replay did exactly what the preview said\n"
+          f"  previewed: {previewed}\n  executed:  {executed}")
+
+
+def test_manifest_records_every_file_and_what_became_of_it():
+    """The manifest is the run's deliverable alongside the moved files - what
+    you read when merging the organised batch into an existing archive."""
+    import csv
+    build_source()
+    run_app(dry_run=False, operation="move", dedupe=True)
+    manifests = list(SCRATCH.glob("kjegla_manifest_*.csv"))
+    check(len(manifests) == 1, f"a manifest was written (got {len(manifests)})")
+
+    rows = list(csv.DictReader(manifests[0].read_text(encoding='utf-8').splitlines()))
+    check(len(rows) == TOTAL, f"one row per file scanned (got {len(rows)})")
+    by_name = {Path(r['original_path']).name: r for r in rows}
+
+    cam1 = by_name['cam1.jpg']
+    check(cam1['action'] == 'organize', f"cam1.jpg was organized (got {cam1['action']})")
+    check(cam1['camera_model'] == 'Samsung Galaxy S23 Ultra',
+          f"...under its camera (got {cam1['camera_model']})")
+    check(cam1['date_source'] == 'exif',
+          f"...dated from EXIF (got {cam1['date_source']})")
+    check(cam1['target_path'].startswith('Samsung Galaxy S23 Ultra'),
+          f"...and the manifest says where it went (got {cam1['target_path']})")
+    check(cam1['verdict'] in ('ok', 'unchecked'),
+          f"...with its integrity verdict (got {cam1['verdict']})")
+
+    # A RAW has no EXIF of its own, so its date honestly says where it came from
+    check(by_name['DSC00001.ARW']['date_source'] == 'mtime',
+          f"a RAW's date is recorded as coming from the file time "
+          f"(got {by_name['DSC00001.ARW']['date_source']})")
+    check(by_name['DSC00001.ARW']['camera_model'] == 'Sony A6000',
+          "...while its camera was borrowed from the JPEG it was taken with")
+
+    screenshot = by_name['Screenshot_20240101-120000.png']
+    check(screenshot['is_screenshot'] == 'yes',
+          f"a screenshot is recorded as one (got {screenshot['is_screenshot']})")
+
+
+def test_manifest_carries_the_hashes_the_duplicate_hunt_already_paid_for():
+    """These are what let the organised batch be compared against an existing
+    archive without reading every byte a second time."""
+    import csv
+    make_img(SCRATCH / "IMG_1234.jpg", model="SM-S918B", date="2023:05:10 14:30:00")
+    shutil.copy2(SCRATCH / "IMG_1234.jpg", SCRATCH / "IMG_1234 (1).jpg")
+    make_img(SCRATCH / "alone.jpg", model="SM-S918B", date="2023:05:11 09:00:00",
+             color='green')
+    run_app(dry_run=False, operation="move", dedupe=True)
+
+    manifest = list(SCRATCH.glob("kjegla_manifest_*.csv"))[0]
+    rows = {Path(r['original_path']).name: r
+            for r in csv.DictReader(manifest.read_text(encoding='utf-8').splitlines())}
+    check(rows['IMG_1234.jpg']['content_hash'],
+          "the keeper of a duplicate set has its hash recorded")
+    check(rows['IMG_1234 (1).jpg']['content_hash']
+          == rows['IMG_1234.jpg']['content_hash'],
+          "...and the copy has the same one, because that is why they matched")
+    check(rows['IMG_1234 (1).jpg']['action'] == 'duplicate',
+          f"the copy is marked a duplicate "
+          f"(got {rows['IMG_1234 (1).jpg']['action']})")
+    check(rows['IMG_1234 (1).jpg']['duplicate_of'] == 'IMG_1234.jpg',
+          f"...naming the file it duplicates "
+          f"(got {rows['IMG_1234 (1).jpg']['duplicate_of']})")
+    check(rows['alone.jpg']['content_hash'] == '',
+          "a file with a unique size was never read, so it has no hash - "
+          "nothing is hashed just to fill in a column")
 
 
 def test_transfers_are_verified_and_a_short_write_keeps_the_original():
