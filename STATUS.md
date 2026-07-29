@@ -1,6 +1,6 @@
 # ArchivePrep - v4 status
 
-**v4.3 is the current release** and supersedes [v34](../../releases), which
+**v4.4 is the current release** and supersedes [v34](../../releases), which
 shipped under the project's former name, Kjegla's Photo Organizer.
 
 The number goes down while the software goes forward: v22 through v35 were
@@ -66,7 +66,7 @@ Four tiers are done. Every one ended with the full suite green.
 | **3 Structure** | Core split from the window; one record per file; deciding split from doing; per-run manifest; CI runs the tests |
 | **4 Understanding** | One place that identifies a file; Takeout sidecar dates; captures; embedded motion clips |
 
-**104 tests, 409 checks.** 97 of them need no screen at all.
+**106 tests, 415 checks.** 99 of them need no screen at all.
 
 ```bash
 pip3 install -r requirements-dev.txt

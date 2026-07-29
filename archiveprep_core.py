@@ -78,6 +78,40 @@ class Progress:
         return self.cancel.is_set()
 
 
+def say(progress, log_file, message):
+    """Report one event, in one wording, to both places it gets read.
+
+    The window and archiveprep_log_*.txt used to be written by two separate
+    calls holding two separately-worded strings, and they drifted apart: the
+    window said "[error] processing X" where the file said "ERROR processing
+    X", and "[plan] would move to" where the file said "Would move to". So
+    reading the file and then searching the window for the line you had just
+    read found nothing - the text genuinely was not there.
+
+    One string written to two destinations cannot drift. Where the window
+    still needs something the file does not - a separator rule, a blank line
+    - call progress.log directly and mean it.
+    """
+    progress.log(message)
+    log_file.write(message.lstrip('\n') + "\n")
+
+
+def mtime_datetime(path):
+    """The file's modified time, or None when it does not have a usable one.
+
+    Windows raises OSError for a timestamp outside the range it can express,
+    and real archives contain files carrying one - a RAW straight off a card
+    whose clock was never set, or a byte-level recovery. This is the last
+    date source there is, so when it fails the honest answer is that the
+    date is unknown. Losing the whole file over an unreadable date would be
+    a far worse trade than filing it under Unknown Date.
+    """
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime)
+    except (OSError, ValueError, OverflowError):
+        return None
+
+
 # EXIF tag ids (base IFD)
 TAG_MAKE = 271
 TAG_MODEL = 272
@@ -1130,7 +1164,15 @@ def get_target_folder(source_path, file_path, camera_model, photo_date,
     base_folder = source_path / (camera_model or "Unknown Camera")
 
     mode = settings.subfolder_mode
-    if mode == "year":
+    if mode == "none":
+        target_folder = base_folder
+    elif photo_date is None:
+        # No date could be established from anything - not metadata, not a
+        # capture sibling, not even the file's own modified time. "Unknown
+        # Date" for the same reason as "Unknown Camera": a folder saying so
+        # is worth more than a year picked to fill the gap.
+        target_folder = base_folder / "Unknown Date"
+    elif mode == "year":
         target_folder = base_folder / str(photo_date.year)
     elif mode == "month":
         target_folder = base_folder / photo_date.strftime("%Y-%m")
@@ -1493,9 +1535,6 @@ def _share_capture_dates(captures, progress):
                 mf.captured_at = primary.captured_at
                 mf.date_source = 'capture'
                 shared += 1
-    if shared:
-        progress.log(f"  {shared} file(s) took their date from the photo "
-                     f"they were captured with")
     return shared
 
 
@@ -1741,63 +1780,58 @@ def _build_model_index(records):
 
 def _write_run_summary(progress, log_file, stats, duration):
     """The end-of-run tally, to the window and to the log file alike."""
+    # One summary, written to both. It used to be written twice with two sets
+    # of labels - "Total media files" in the window against "Total files" in
+    # the file - which made the two disagree about the same run.
     progress.log("\n" + "=" * 60)
-    progress.log("SUMMARY:")
-    progress.log(f"Total media files: {stats['total_files']}")
-    progress.log(f"Files processed: {stats['processed']}")
-    progress.log(f"Files without metadata: {stats['no_metadata']}")
-    progress.log(f"Screenshots detected: {stats['screenshots']}")
+    log_file.write("\n" + "=" * 60 + "\n")
+    say(progress, log_file, "SUMMARY:")
+    say(progress, log_file, f"Total media files: {stats['total_files']}")
+    say(progress, log_file, f"Files processed: {stats['processed']}")
+    say(progress, log_file, f"Files without metadata: {stats['no_metadata']}")
+    say(progress, log_file, f"Screenshots detected: {stats['screenshots']}")
     if stats['content_duplicates']:
         wasted = stats['duplicate_bytes'] / (1024 * 1024)
-        progress.log(f"Duplicate copies set aside: {stats['content_duplicates']} "
-                     f"({wasted:.2f} MB) -> '{DUPLICATES_FOLDER}' folder")
+        say(progress, log_file,
+            f"Duplicate copies set aside: {stats['content_duplicates']} "
+            f"({wasted:.2f} MB) -> '{DUPLICATES_FOLDER}' folder")
     if stats['damaged']:
-        progress.log(f"Damaged files found: {stats['damaged']} "
-                     f"-> '{CORRUPT_FOLDER}' folder")
+        say(progress, log_file, f"Damaged files found: {stats['damaged']} "
+                                f"-> '{CORRUPT_FOLDER}' folder")
     if stats['misnamed']:
-        progress.log(f"Wrongly-named files fixed: {stats['misnamed']} "
-                     f"-> renamed to the right extension and moved to "
-                     f"'{WRONG_EXT_FOLDER}' (their contents were fine)")
+        say(progress, log_file,
+            f"Wrongly-named files fixed: {stats['misnamed']} "
+            f"-> renamed to the right extension and moved to "
+            f"'{WRONG_EXT_FOLDER}' (their contents were fine)")
     if stats['unchecked']:
-        progress.log(f"Files that could not be checked: {stats['unchecked']} "
-                     f"(RAW / some video formats)")
+        say(progress, log_file,
+            f"Files that could not be checked: {stats['unchecked']} "
+            f"(RAW / some video formats)")
     if stats['duplicates']:
-        progress.log(f"Identical duplicates skipped: {stats['duplicates']}")
+        say(progress, log_file,
+            f"Identical duplicates skipped: {stats['duplicates']}")
     if stats['already_organized']:
-        progress.log(f"Already organized (untouched): {stats['already_organized']}")
-    progress.log(f"Errors: {stats['errors']}")
-    progress.log(f"Total size: {stats['total_size_mb']:.2f} MB")
-    progress.log(f"Duration: {duration:.1f} seconds")
-
-    log_file.write("\n" + "=" * 60 + "\n")
-    log_file.write("SUMMARY:\n")
-    log_file.write(f"Total files: {stats['total_files']}\n")
-    log_file.write(f"Processed: {stats['processed']}\n")
-    log_file.write(f"No metadata/unknown: {stats['no_metadata']}\n")
-    log_file.write(f"Screenshots detected: {stats['screenshots']}\n")
-    log_file.write(f"Identical duplicates skipped: {stats['duplicates']}\n")
-    log_file.write(f"Duplicate copies set aside: {stats['content_duplicates']}\n")
-    log_file.write(f"Damaged files: {stats['damaged']}\n")
-    log_file.write(f"Wrong file extension: {stats['misnamed']}\n")
-    log_file.write(f"Could not be checked: {stats['unchecked']}\n")
-    log_file.write(f"Empty folders removed: {stats['empty_folders_removed']}\n")
-    log_file.write(f"Already organized: {stats['already_organized']}\n")
-    log_file.write(f"Errors: {stats['errors']}\n")
-    log_file.write(f"Total size: {stats['total_size_mb']:.2f} MB\n")
-    log_file.write(f"Duration: {duration:.1f} seconds\n")
+        say(progress, log_file,
+            f"Already organized (untouched): {stats['already_organized']}")
+    if stats['empty_folders_removed']:
+        say(progress, log_file,
+            f"Empty folders removed: {stats['empty_folders_removed']}")
+    say(progress, log_file, f"Errors: {stats['errors']}")
+    say(progress, log_file, f"Total size: {stats['total_size_mb']:.2f} MB")
+    say(progress, log_file, f"Duration: {duration:.1f} seconds")
 
     if stats['by_model']:
-        progress.log("\nFiles per camera model:")
-        log_file.write("\nFiles per camera model:\n")
+        say(progress, log_file, "\nFiles per camera model:")
         for model, count in sorted(stats['by_model'].items()):
-            progress.log(f"  {model}: {count} files")
-            log_file.write(f"  {model}: {count} files\n")
+            say(progress, log_file, f"  {model}: {count} files")
 
     if stats['no_metadata'] > 0:
-        progress.log(f"\nUnknown/unmatched files: {stats['no_metadata']} "
-                     f"(moved to 'Unknown Camera' folder)")
+        say(progress, log_file,
+            f"\nUnknown/unmatched files: {stats['no_metadata']} "
+            f"(moved to 'Unknown Camera' folder)")
     if stats['screenshots'] > 0:
-        progress.log(f"\nScreenshots separated: {stats['screenshots']} files")
+        say(progress, log_file,
+            f"\nScreenshots separated: {stats['screenshots']} files")
 
 
 def organize_photos(settings, progress, dry_run=True):
@@ -1819,24 +1853,42 @@ def organize_photos(settings, progress, dry_run=True):
     operation = settings.operation
     operation_text = "Moving" if operation == "move" else "Copying"
 
+    # Built once and shown twice. The window gets it now, because the settings
+    # are worth seeing before a long scan starts; the log file gets the same
+    # lines further down, once it exists. Writing it out twice by hand is how
+    # the two came to disagree about what a run was.
+    yes_no = lambda flag: 'Yes' if flag else 'No'          # noqa: E731
+    header = [
+        f"ArchivePrep - {'DRY RUN' if dry_run else operation_text.upper()}",
+        f"Source: {source_path}",
+        f"Operation: {operation}",
+        f"Subfolder mode: {settings.subfolder_mode}",
+        f"Separate RAW files: {yes_no(settings.separate_raw)}",
+        f"Separate Screenshots: {yes_no(settings.separate_screenshots)}",
+        f"Include subfolders: {yes_no(settings.include_subfolders)}",
+        f"Multithreading: {yes_no(settings.use_multithreading)}",
+        f"Find duplicates by content: {yes_no(settings.dedupe_content)}",
+        "Check files for damage: "
+        + (('Yes (thorough)' if settings.corrupt_thorough else 'Yes')
+           if settings.check_corrupt else 'No'),
+        f"Delete empty folders: {yes_no(settings.cleanup_empty)}",
+    ]
     progress.log("=" * 60)
-    progress.log(f"ArchivePrep - "
-                 f"{'DRY RUN' if dry_run else operation_text.upper()}")
-    progress.log(f"Source: {source_path}")
-    progress.log(f"Operation: {operation}")
-    progress.log(f"Subfolder mode: {settings.subfolder_mode}")
-    progress.log(f"Separate RAW files: {'Yes' if settings.separate_raw else 'No'}")
-    progress.log(f"Separate Screenshots: "
-                 f"{'Yes' if settings.separate_screenshots else 'No'}")
-    progress.log(f"Include subfolders: "
-                 f"{'Yes' if settings.include_subfolders else 'No'}")
-    progress.log(f"Multithreading: {'Yes' if settings.use_multithreading else 'No'}")
-    progress.log(f"Find duplicates by content: "
-                 f"{'Yes' if settings.dedupe_content else 'No'}")
-    progress.log(f"Check files for damage: "
-                 f"{('Yes (thorough)' if settings.corrupt_thorough else 'Yes') if settings.check_corrupt else 'No'}")
-    progress.log(f"Delete empty folders: {'Yes' if settings.cleanup_empty else 'No'}")
+    for line in header:
+        progress.log(line)
     progress.log("=" * 60)
+
+    # The run log is only opened once the scan has finished, so everything the
+    # scan phase says would otherwise reach the window and nothing else - and
+    # some of it is a finding worth keeping, not just status ("N file(s) took
+    # their date from the photo they were captured with"). Held here, written
+    # into the file the moment it exists.
+    preamble = list(header)
+
+    def report(message):
+        """Tell the window now, and the run log as soon as there is one."""
+        progress.log(message)
+        preamble.append(message)
 
     # ---- SCAN ------------------------------------------------------------
     try:
@@ -1855,27 +1907,27 @@ def organize_photos(settings, progress, dry_run=True):
     stats['total_files'] = len(media_files)
 
     if not media_files:
-        progress.log("No media files found in the source folder!")
+        report("No media files found in the source folder!")
         progress.status("No media files found")
         return stats, cached_plan
 
-    progress.log("\nReading media metadata...")
+    report("\nReading media metadata...")
     records = _scan_files(media_files, settings, progress)
     if progress.cancelled:
-        progress.log("\nOperation cancelled by user")
+        report("\nOperation cancelled by user")
         progress.status("Cancelled")
         return stats, cached_plan
 
     if settings.check_corrupt or settings.fix_extensions:
         if settings.check_corrupt:
-            progress.log("\nChecking files for damage"
-                         f"{' (thorough)' if settings.corrupt_thorough else ''}...")
+            report("\nChecking files for damage"
+                   f"{' (thorough)' if settings.corrupt_thorough else ''}...")
         else:
-            progress.log("\nChecking whether file extensions match their "
-                         "contents...")
+            report("\nChecking whether file extensions match their "
+                   "contents...")
         _check_health(records, settings, progress)
         if progress.cancelled:
-            progress.log("\nOperation cancelled by user")
+            report("\nOperation cancelled by user")
             progress.status("Cancelled")
             return stats, cached_plan
         verdicts = [mf.verdict for mf in records.values()]
@@ -1884,24 +1936,27 @@ def organize_photos(settings, progress, dry_run=True):
         stats['unchecked'] = verdicts.count('unchecked')
         fine = len(verdicts) - stats['damaged'] - stats['misnamed'] - stats['unchecked']
         if settings.check_corrupt:
-            progress.log(f"  {stats['damaged']} damaged, "
-                         f"{stats['misnamed']} with the wrong file extension, "
-                         f"{stats['unchecked']} could not be checked, {fine} fine")
+            report(f"  {stats['damaged']} damaged, "
+                   f"{stats['misnamed']} with the wrong file extension, "
+                   f"{stats['unchecked']} could not be checked, {fine} fine")
         else:
-            progress.log(f"  {stats['misnamed']} file(s) have an extension "
-                         f"that doesn't match their contents")
+            report(f"  {stats['misnamed']} file(s) have an extension "
+                   f"that doesn't match their contents")
 
     # Files from one shutter press belong together, and share a date
     captures = _group_captures(records)
-    _share_capture_dates(captures, progress)
+    shared_dates = _share_capture_dates(captures, progress)
+    if shared_dates:
+        report(f"  {shared_dates} file(s) took their date from the photo "
+               f"they were captured with")
 
     duplicate_groups = []
     if settings.dedupe_content:
-        progress.log("\nLooking for duplicate files by content...")
+        report("\nLooking for duplicate files by content...")
         duplicate_groups = _find_duplicates(records, settings, progress)
         duplicate_groups += _find_embedded_clips(captures, progress)
         if progress.cancelled:
-            progress.log("\nOperation cancelled by user")
+            report("\nOperation cancelled by user")
             progress.status("Cancelled")
             return stats, cached_plan
         dups = [mf for mf in records.values() if mf.duplicate_of is not None]
@@ -1909,18 +1964,18 @@ def organize_photos(settings, progress, dry_run=True):
         stats['duplicate_bytes'] = sum(mf.size for mf in dups)
         if duplicate_groups:
             wasted = stats['duplicate_bytes'] / (1024 * 1024)
-            progress.log(f"  Found {len(duplicate_groups)} set(s) of identical "
-                         f"files - {len(dups)} extra copies ({wasted:.2f} MB)")
+            report(f"  Found {len(duplicate_groups)} set(s) of identical "
+                   f"files - {len(dups)} extra copies ({wasted:.2f} MB)")
         else:
-            progress.log("  No duplicates found")
+            report("  No duplicates found")
     else:
         progress.percent(60)
 
     base_name_to_model = _build_model_index(records)
-    progress.log(f"Found {len(base_name_to_model)} images with camera metadata")
-    progress.log(f"Found {len(raw_files)} RAW files and "
-                 f"{sum(1 for mf in records.values() if mf.kind == 'video')} "
-                 f"video files")
+    report(f"Found {len(base_name_to_model)} images with camera metadata")
+    report(f"Found {len(raw_files)} RAW files and "
+           f"{sum(1 for mf in records.values() if mf.kind == 'video')} "
+           f"video files")
 
     run_stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     log_filename = f"archiveprep_log_{run_stamp}.txt"
@@ -1933,17 +1988,12 @@ def organize_photos(settings, progress, dry_run=True):
         report_name = f"archiveprep_duplicates_{run_stamp}.txt"
         _write_duplicate_report(source_path / report_name, duplicate_groups,
                                 source_path)
-        progress.log(f"Duplicate report saved: {report_name}")
+        report(f"Duplicate report saved: {report_name}")
 
     with open(log_path, 'w', encoding='utf-8') as log_file:
         log_file.write(f"ArchivePrep run log - {datetime.now()}\n")
-        log_file.write(f"Source Folder: {source_path}\n")
-        log_file.write(f"Mode: {'DRY RUN' if dry_run else operation.upper()}\n")
-        log_file.write(f"Subfolder organization: {settings.subfolder_mode}\n")
-        log_file.write(f"Separate RAW files: "
-                       f"{'Yes' if settings.separate_raw else 'No'}\n")
-        log_file.write(f"Separate Screenshots: "
-                       f"{'Yes' if settings.separate_screenshots else 'No'}\n")
+        for line in preamble:
+            log_file.write(line.lstrip('\n') + "\n")
         log_file.write("=" * 60 + "\n\n")
 
         # ---- DECIDE ------------------------------------------------------
@@ -1961,9 +2011,8 @@ def organize_photos(settings, progress, dry_run=True):
                 _plan_one_file(mf, source_path, settings, base_name_to_model,
                                ctx, dry_run, log_file)
             except Exception as e:
-                progress.log(f"\n[error] processing {mf.path.name}: {e}")
-                progress.log("   Skipping this file and continuing...")
-                log_file.write(f"ERROR processing {mf.path.name}: {e}\n")
+                say(progress, log_file, f"\n[error] processing {mf.path.name}: {e}")
+                say(progress, log_file, "   Skipping this file and continuing...")
                 stats['errors'] += 1
 
         # ---- APPLY -------------------------------------------------------
@@ -2262,10 +2311,9 @@ def _plan_set_aside(mf, source_path, folder_name, kind, reason, ctx,
         # Copy mode leaves the source untouched and the good original is
         # already there, so making a third copy of a redundant or broken
         # file would only add clutter.
-        ctx.progress.log(f"\n{tag} {rel}: {reason}")
-        ctx.progress.log("  [skip] Left where it is (copy mode never touches the source)")
-        log_file.write(f"{folder_name}: {rel} - {reason} "
-                       f"(copy mode, not copied)\n")
+        say(ctx.progress, log_file, f"\n{tag} {rel}: {reason}")
+        say(ctx.progress, log_file,
+            "  [skip] left where it is (copy mode never touches the source)")
         mf.action, mf.reason = 'skipped', reason
         return
 
@@ -2275,9 +2323,9 @@ def _plan_set_aside(mf, source_path, folder_name, kind, reason, ctx,
 
     if _claimed(ctx, target):
         if _same_as_whatever_lands_at(ctx, mf.path, target):
-            ctx.progress.log(f"\n{tag} {rel}: already set aside in "
-                             f"{folder_name}/, leaving it alone")
-            log_file.write(f"{folder_name}: {rel} already present - skipped\n")
+            say(ctx.progress, log_file,
+                f"\n{tag} {rel}: already set aside in {folder_name}/, "
+                f"leaving it alone")
             mf.action, mf.reason = 'skipped', "already set aside"
             return
         base = target
@@ -2287,16 +2335,15 @@ def _plan_set_aside(mf, source_path, folder_name, kind, reason, ctx,
             counter += 1
     ctx.planned[str(target).lower()] = mf.path
 
-    ctx.progress.log(f"\n{tag} {rel}: {reason}")
+    say(ctx.progress, log_file, f"\n{tag} {rel}: {reason}")
     relative_target = target.relative_to(source_path)
     mf.action, mf.target, mf.reason = kind, target, reason
     ctx.ops.append(Operation(source=mf.path, target=target, kind=kind,
                              operation="move"))
 
     if dry_run:
-        ctx.progress.log(f"  [plan] would move to: {relative_target}")
-        log_file.write(f"{folder_name}: would move {rel} -> "
-                       f"{relative_target}\n")
+        say(ctx.progress, log_file,
+            f"  [plan] would move to: {relative_target}")
 
 
 def _plan_one_file(mf, source_path, settings, base_name_to_model, ctx,
@@ -2371,10 +2418,12 @@ def _plan_one_file(mf, source_path, settings, base_name_to_model, ctx,
     if separate_shot:
         file_type += " (Screenshot)"
 
-    # Date: metadata (EXIF / video header) if available, else modified time
+    # Date: metadata (EXIF / video header) if available, else modified time -
+    # and if even that is unreadable, the date is honestly unknown rather than
+    # the file being dropped.
     if mf.captured_at is None:
-        mf.captured_at = datetime.fromtimestamp(file_path.stat().st_mtime)
-        mf.date_source = 'mtime'
+        mf.captured_at = mtime_datetime(file_path)
+        mf.date_source = 'mtime' if mf.captured_at else 'unknown'
 
     target_folder = get_target_folder(source_path, file_path, mf.camera_model,
                                       mf.captured_at, settings, separate_shot)
@@ -2382,9 +2431,8 @@ def _plan_one_file(mf, source_path, settings, base_name_to_model, ctx,
 
     # Recursive re-runs: files already in their correct spot are untouched
     if target_path == file_path:
-        ctx.progress.log(f"\n[skip] already organized: "
-                         f"{file_path.relative_to(source_path)}")
-        log_file.write(f"Already organized - skipped: {file_path.name}\n")
+        say(ctx.progress, log_file,
+            f"\n[skip] already organized: {file_path.relative_to(source_path)}")
         ctx.stats['already_organized'] += 1
         mf.action, mf.reason = 'skipped', "already organized"
         return
@@ -2392,16 +2440,16 @@ def _plan_one_file(mf, source_path, settings, base_name_to_model, ctx,
     file_size_mb = mf.size / (1024 * 1024)
     ctx.stats['total_size_mb'] += file_size_mb
 
-    ctx.progress.log(f"\n{file_type} {file_path.name} ({file_size_mb:.2f} MB)")
-    log_file.write(f"Processing: {file_path.name}\n")
+    say(ctx.progress, log_file,
+        f"\n{file_type} {file_path.name} ({file_size_mb:.2f} MB)")
     if match_note:
-        ctx.progress.log(match_note)
+        say(ctx.progress, log_file, match_note)
     if separate_shot:
         ctx.stats['screenshots'] += 1
 
     # Update statistics
-    ctx.stats['by_year'][str(mf.captured_at.year)] = \
-        ctx.stats['by_year'].get(str(mf.captured_at.year), 0) + 1
+    year = str(mf.captured_at.year) if mf.captured_at else "Unknown"
+    ctx.stats['by_year'][year] = ctx.stats['by_year'].get(year, 0) + 1
     if mf.camera_model:
         ctx.stats['by_model'][mf.camera_model] = \
             ctx.stats['by_model'].get(mf.camera_model, 0) + 1
@@ -2413,9 +2461,9 @@ def _plan_one_file(mf, source_path, settings, base_name_to_model, ctx,
     # even though nothing has been moved yet.
     if _claimed(ctx, target_path):
         if _same_as_whatever_lands_at(ctx, file_path, target_path):
-            ctx.progress.log("  [skip] identical file already at destination"
-                             f"{' (left in source)' if settings.operation == 'move' else ''}")
-            log_file.write("  Identical duplicate - skipped\n")
+            say(ctx.progress, log_file,
+                "  [skip] identical file already at destination"
+                f"{' (left in source)' if settings.operation == 'move' else ''}")
             ctx.stats['duplicates'] += 1
             mf.action, mf.reason = 'skipped', "identical file already at destination"
             return
@@ -2424,12 +2472,13 @@ def _plan_one_file(mf, source_path, settings, base_name_to_model, ctx,
             target_path = target_folder / f"{file_path.stem}_{counter}{file_path.suffix}"
             counter += 1
             if _same_as_whatever_lands_at(ctx, file_path, target_path):
-                ctx.progress.log("  [skip] identical file already at destination")
-                log_file.write("  Identical duplicate - skipped\n")
+                say(ctx.progress, log_file,
+                    "  [skip] identical file already at destination")
                 ctx.stats['duplicates'] += 1
                 mf.action, mf.reason = 'skipped', "identical file already at destination"
                 return
-        ctx.progress.log(f"  [rename] target taken, will use: {target_path.name}")
+        say(ctx.progress, log_file,
+            f"  [rename] target taken, will use: {target_path.name}")
     ctx.planned[str(target_path).lower()] = file_path
 
     mf.action, mf.target = 'organize', target_path
@@ -2438,8 +2487,8 @@ def _plan_one_file(mf, source_path, settings, base_name_to_model, ctx,
 
     if dry_run:
         relative_path = target_path.relative_to(source_path)
-        ctx.progress.log(f"  [plan] would {settings.operation} to: {relative_path}")
-        log_file.write(f"  Would {settings.operation} to: {relative_path}\n")
+        say(ctx.progress, log_file,
+            f"  [plan] would {settings.operation} to: {relative_path}")
         ctx.stats['processed'] += 1
 
 
@@ -2454,21 +2503,19 @@ def _note_leftover_folders(source_path, progress, log_file):
     leftovers = find_leftover_only_folders(source_path)
     if not leftovers:
         return
-    progress.log(f"\n{len(leftovers)} folder(s) are empty apart from files "
-                 f"Windows or macOS regenerate by themselves:")
-    log_file.write(f"\n{len(leftovers)} folder(s) left holding only "
-                   f"regenerable files\n")
+    say(progress, log_file,
+        f"\n{len(leftovers)} folder(s) are empty apart from files "
+        f"Windows or macOS regenerate by themselves:")
     for folder, entries in leftovers[:20]:
         names = ", ".join(sorted(e.name for e in entries))
         rel = folder.relative_to(source_path)
-        progress.log(f"  {rel}  ({names})")
-        log_file.write(f"  {rel}: {names}\n")
+        say(progress, log_file, f"  {rel}  ({names})")
     if len(leftovers) > 20:
-        progress.log(f"  ... and {len(leftovers) - 20} more")
-    progress.log("They were left alone because a folder with a file in it is "
-                 "not empty,")
-    progress.log("and this application does not decide which of your files do "
-                 "not count.")
+        say(progress, log_file, f"  ... and {len(leftovers) - 20} more")
+    say(progress, log_file,
+        "They were left alone because a folder with a file in it is not empty,")
+    say(progress, log_file,
+        "and this application does not decide which of your files do not count.")
     progress.notify("leftover_folders", leftovers)
 
 
@@ -2488,42 +2535,52 @@ def _report_failures(failures, source_path, progress, log_file):
     other = [(p, e) for p, e in failures if (p, e) not in denied]
 
     progress.log("\n" + "=" * 60)
-    progress.log(f"{len(failures)} file(s) could not be moved and are still "
-                 f"where they were:")
-    log_file.write(f"\n{len(failures)} FILE(S) COULD NOT BE MOVED\n")
+    say(progress, log_file,
+        f"{len(failures)} file(s) could not be moved and are still "
+        f"where they were:")
 
     if denied:
-        progress.log(f"\n  {len(denied)} refused by Windows (access denied).")
-        progress.log("  This usually means the files were copied from another "
-                     "computer and")
-        progress.log("  still carry that computer's permissions - your account "
-                     "can read them")
-        progress.log("  but not move them. Deleting one in Explorer would "
-                     "raise a UAC prompt;")
-        progress.log("  this application does not ask for administrator "
-                     "rights and will not")
-        progress.log("  change permissions on your files by itself.")
-        progress.log("\n  To take ownership, in an administrator terminal:")
+        say(progress, log_file,
+            f"\n  {len(denied)} refused by Windows (access denied).")
+        for line in (
+                "  This usually means the files were copied from another "
+                "computer and",
+                "  still carry that computer's permissions - your account "
+                "can read them",
+                "  but not move them. Deleting one in Explorer would raise a "
+                "UAC prompt;",
+                "  this application does not ask for administrator rights and "
+                "will not",
+                "  change permissions on your files by itself."):
+            say(progress, log_file, line)
+        say(progress, log_file,
+            "\n  To take ownership, in an administrator terminal:")
         folder = denied[0][0].parent
-        progress.log(f'    takeown /F "{folder}" /R /D Y')
-        progress.log(f'    icacls "{folder}" /grant "%USERNAME%":(OI)(CI)F /T')
+        say(progress, log_file, f'    takeown /F "{folder}" /R /D Y')
+        say(progress, log_file,
+            f'    icacls "{folder}" /grant "%USERNAME%":(OI)(CI)F /T')
 
     for label, group in (("access denied", denied), ("other errors", other)):
         if not group:
             continue
-        progress.log(f"\n  {label}:")
+        say(progress, log_file, f"\n  {label}:")
         for path, err in group[:20]:
             try:
                 shown = path.relative_to(source_path)
             except ValueError:
                 shown = path
-            progress.log(f"    {shown}")
-            log_file.write(f"  {shown}: {err}\n")
+            say(progress, log_file, f"    {shown}: {err}")
         if len(group) > 20:
+            # The one place the file deliberately says more than the window:
+            # it carries the whole list where the window shows the first 20.
             progress.log(f"    ... and {len(group) - 20} more "
                          f"(the full list is in the log file)")
             for path, err in group[20:]:
-                log_file.write(f"  {path}: {err}\n")
+                try:
+                    shown = path.relative_to(source_path)
+                except ValueError:
+                    shown = path
+                log_file.write(f"    {shown}: {err}\n")
 
 
 def _apply_plan(ops, source_path, progress, stats, log_file, undo_path,
@@ -2585,9 +2642,9 @@ def _apply_plan(ops, source_path, progress, stats, log_file, undo_path,
             # is the very same file, in which case there is nothing to do.
             if target.exists():
                 if files_identical(source, target):
-                    progress.log(f"  [skip] {source.name}: identical file already "
-                                 f"at destination, skipping")
-                    log_file.write(f"  Identical duplicate - skipped: {source}\n")
+                    say(progress, log_file,
+                        f"  [skip] {source.name}: identical file already "
+                        f"at destination, skipping")
                     stats['duplicates'] += 1
                     continue
                 base = target
@@ -2616,14 +2673,12 @@ def _apply_plan(ops, source_path, progress, stats, log_file, undo_path,
             # Names the file as well as the destination: deciding and doing
             # are separate passes now, so the action lines are no longer
             # sitting directly under the "Processing X" line they belong to.
-            progress.log(f"  [done] {operation_text[op.operation]} {source.name} "
-                         f"-> {relative}")
-            log_file.write(f"  {operation_text[op.operation]} {source.name} "
-                           f"-> {relative}\n")
+            say(progress, log_file,
+                f"  [done] {operation_text[op.operation]} {source.name} "
+                f"-> {relative}")
             stats['processed'] += 1
         except Exception as e:
-            progress.log(f"  [error] {source.name}: {e}")
-            log_file.write(f"  FILE OPERATION ERROR {source}: {e}\n")
+            say(progress, log_file, f"  [error] {source.name}: {e}")
             stats['errors'] += 1
             failures.append((source, e))
             # The manifest is the record of what happened, so a file that did

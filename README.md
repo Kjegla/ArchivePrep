@@ -3,7 +3,7 @@
 **Turns an unknown, messy media collection into a clean, understood archive you
 can merge into long-term storage with confidence.**
 
-> **v4.3 is the current release** and supersedes v34, which shipped under the
+> **v4.4 is the current release** and supersedes v34, which shipped under the
 > project's former name, Kjegla's Photo Organizer. Despite the lower number,
 > v4 is newer: it is a new architectural generation rather than the next
 > increment. See [STATUS.md](STATUS.md) for what changed.
@@ -74,6 +74,12 @@ sitting inside the photo, never by its name.
 If a file's camera cannot be established from its metadata or from the photos
 it was captured with, it goes to `Unknown Camera` and stays there.
 
+The same goes for dates. A file whose date cannot be read from anything - not
+its metadata, not the photos it was captured with, and not even its own
+modified time, which some files carry in a form the operating system refuses -
+is filed under `Unknown Date` rather than being dropped or assigned a year to
+fill the gap.
+
 That is not a failure - it is the honest answer, and an archive you can trust
 is worth more than one where things were guessed into place.
 
@@ -104,6 +110,12 @@ and every occurrence is highlighted where it sits, with a count and
 file?" is answered without opening the `.txt`. It keeps counting while a run is
 still printing, and it does not scroll the log out from under you while it
 does. `Ctrl+F` jumps to it, `Enter` and `Shift+Enter` step, `Esc` clears it.
+
+**The window and the run log say the same words.** A line read in the `.txt`
+can be pasted into Find and located in the window, and the reverse. They are
+written from one string rather than two, so they cannot drift apart again. The
+only things the window says alone are remarks about the files a run produced -
+it would be circular for a log to announce its own name inside itself.
 
 ## Maintenance extras
 
@@ -195,7 +207,7 @@ pip3 install -r requirements-dev.txt
 python -m pytest tests/ -q
 ```
 
-104 tests, 409 checks. They build real photos and videos in a temporary folder
+106 tests, 415 checks. They build real photos and videos in a temporary folder
 and run the real code against them, so a passing run means the real thing
 works - not a simplified copy of it. Every test starts from a clean folder, so
 you can run just the one you care about:

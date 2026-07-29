@@ -61,6 +61,7 @@ class ArchivePrepGUI:
         self.log_search = tk.StringVar()
         self._matches = []
         self._match_index = -1
+        self._dropped_lines = 0
         self.processing = False
         self.last_undo_file = None
         self.last_rename_undo_file = None  # undo for the extension fixes alone
@@ -499,6 +500,7 @@ class ArchivePrepGUI:
         self.output_text.delete(1.0, tk.END)
         self._matches = []
         self._match_index = -1
+        self._dropped_lines = 0
         self.match_label.config(text="" if not self.log_search.get()
                                 else "no matches")
 
@@ -560,13 +562,29 @@ class ArchivePrepGUI:
 
         if log_lines:
             self.output_text.insert(tk.END, "\n".join(log_lines) + "\n")
-            # Keep the widget bounded so very large runs stay responsive
+            # Keep the widget bounded so very large runs stay responsive. It
+            # says so when it drops lines: silently discarding them makes the
+            # log lie about the run, and searching for something that scrolled
+            # off would fail with no explanation.
             line_count = int(self.output_text.index('end-1c').split('.')[0])
             if line_count > 6000:
-                self.output_text.delete('1.0', f'{line_count - 5000}.0')
-            self.output_text.see(tk.END)
+                dropped = line_count - 5000
+                self.output_text.delete('1.0', f'{dropped}.0')
+                # One of those deleted lines was the previous notice, not a
+                # line of the run.
+                self._dropped_lines += dropped - (1 if self._dropped_lines else 0)
+                self.output_text.insert(
+                    '1.0',
+                    f"[trimmed] {self._dropped_lines} earlier line(s) are not "
+                    f"shown here - the run log on disk has all of them.\n")
+            # Following the tail is only helpful while nobody is reading. A
+            # search means someone is: scrolling to the end here would drag
+            # the view off the match they just found, 100ms after they found
+            # it, which looked exactly like Find not working.
             if self.log_search.get():
                 self._highlight_matches(keep_position=True)
+            else:
+                self.output_text.see(tk.END)
         if last_status is not None:
             self.status_label.config(text=last_status)
         if last_progress is not None:

@@ -1315,3 +1315,89 @@ def test_transfers_are_verified_and_a_short_write_keeps_the_original():
     check(victim.exists(), "the original survives a failed move")
     check(victim.stat().st_size == 2700,
           f"...intact, not half-written (got {victim.stat().st_size} bytes)")
+
+
+# ---------------------------------------------------------------------------
+# The window and the log file must describe the same run
+# ---------------------------------------------------------------------------
+
+def _run_capturing_the_window():
+    """Organize the scratch folder, keeping what the window would have shown."""
+    import queue as q
+    box = q.Queue()
+    core.organize_photos(make_settings(operation="move"), core.Progress(box),
+                         dry_run=True)
+    shown = []
+    try:
+        while True:
+            action, value, _extra = box.get_nowait()
+            if action == "log":
+                shown.append(value)
+    except q.Empty:
+        pass
+    log_path = sorted(SCRATCH.glob("archiveprep_log_*.txt"))[-1]
+    return shown, log_path.read_text(encoding="utf-8", errors="replace")
+
+
+def test_the_window_and_the_log_file_use_the_same_words():
+    """You read the .txt, then search the window for a line you just read.
+
+    These were two separate calls holding two separately-worded strings, and
+    they drifted: the window said "[error] processing X" where the file said
+    "ERROR processing X", "[plan] would move to" against "Would move to",
+    "[photo] X (2.3 MB)" against "Processing: X". Searching one for what you
+    read in the other found nothing, and the text really was not there.
+
+    Anything the window shows has to be findable in the file. The file may say
+    more - it keeps the full failure list where the window shows the first 20 -
+    but it may never say the same thing differently.
+    """
+    build_source()
+    shown, file_text = _run_capturing_the_window()
+    check(len(shown) > 10, f"the window was actually given lines (got {len(shown)})")
+
+    # The window alone says these, and should: they are remarks about the
+    # artifacts and about what to do next, made once the run log has been
+    # closed. A log file announcing its own name inside itself would be
+    # circular, and "Preview cached" describes the window's state, not the
+    # archive's. Everything that describes the *run* has to be in both.
+    about_the_artifacts = ("Log file saved:", "Manifest saved:",
+                           "This was a DRY RUN", "Preview cached")
+
+    missing = [line for line in shown
+               if line.strip() and set(line.strip()) != {"="}
+               and not line.strip().startswith(about_the_artifacts)
+               and line.strip() not in file_text]
+    check(missing == [],
+          f"{len(missing)} line(s) the window showed are absent from the log "
+          f"file, so searching for them would fail: {missing[:4]}")
+
+
+def test_a_file_with_an_unreadable_date_is_filed_not_dropped():
+    """Windows raises OSError for a modified time outside the range it can
+    express, and a RAW is the file that reaches that fallback - it carries no
+    date this application reads. That used to escape as "[Errno 22] Invalid
+    argument", be caught by the generic handler, and the file was skipped
+    entirely: not organized, not reported beyond one error line.
+
+    Unknown is an acceptable answer. Losing the file is not.
+    """
+    build_source()
+    broken = SCRATCH / "DSC09999.ARW"
+    try:
+        os.utime(broken, (-8000000000, -8000000000))
+    except (OSError, OverflowError, ValueError):
+        import pytest
+        pytest.skip("this filesystem will not store an out-of-range mtime")
+
+    check(core.mtime_datetime(broken) is None,
+          "the date really is unreadable, so the test is exercising the fallback")
+
+    stats = run_app(dry_run=False, operation="move")
+    check(stats['errors'] == 0,
+          f"the unreadable date is no longer an error (got {stats['errors']})")
+
+    landed = [p for p in relpaths() if p.endswith("DSC09999.ARW")]
+    check(len(landed) == 1, f"the file was still filed somewhere (got {landed})")
+    check("Unknown Date" in landed[0],
+          f"and it says the date is unknown rather than guessing: {landed[0]}")
