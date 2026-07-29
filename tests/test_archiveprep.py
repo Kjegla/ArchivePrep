@@ -1373,25 +1373,48 @@ def test_the_window_and_the_log_file_use_the_same_words():
           f"file, so searching for them would fail: {missing[:4]}")
 
 
+def test_a_file_with_no_readable_date_goes_to_unknown_date():
+    """The decision itself, on every platform.
+
+    A file whose date cannot be established from anything is filed under
+    "Unknown Date" for the same reason an unidentifiable camera is filed under
+    "Unknown Camera": an honest folder beats a year picked to fill the gap.
+    """
+    build_source()
+    raw = SCRATCH / "DSC09999.ARW"
+    for mode, expected in (("year", True), ("month", True),
+                           ("year-month", True), ("none", False)):
+        s = make_settings(subfolder=mode)
+        folder = str(core.get_target_folder(SCRATCH, raw, "Sony A6000", None,
+                                            s, False))
+        check(("Unknown Date" in folder) is expected,
+              f"subfolder mode {mode!r} -> {folder}")
+
+    check(core.mtime_datetime(SCRATCH / "cam1.jpg") is not None,
+          "a file with an ordinary modified time still reports it")
+
+
 def test_a_file_with_an_unreadable_date_is_filed_not_dropped():
     """Windows raises OSError for a modified time outside the range it can
-    express, and a RAW is the file that reaches that fallback - it carries no
-    date this application reads. That used to escape as "[Errno 22] Invalid
-    argument", be caught by the generic handler, and the file was skipped
-    entirely: not organized, not reported beyond one error line.
+    express, and a RAW is what reaches that fallback - it carries no date this
+    application reads. That used to escape as "[Errno 22] Invalid argument",
+    be caught by the generic handler, and the file was skipped entirely: not
+    organized, not in the manifest, one error line in a run of hundreds.
 
     Unknown is an acceptable answer. Losing the file is not.
+
+    Only Windows refuses these timestamps; Linux and macOS read a negative
+    one as a date in 1716 and carry on, so there is nothing to exercise there.
     """
+    import pytest
     build_source()
     broken = SCRATCH / "DSC09999.ARW"
     try:
         os.utime(broken, (-8000000000, -8000000000))
     except (OSError, OverflowError, ValueError):
-        import pytest
         pytest.skip("this filesystem will not store an out-of-range mtime")
-
-    check(core.mtime_datetime(broken) is None,
-          "the date really is unreadable, so the test is exercising the fallback")
+    if core.mtime_datetime(broken) is not None:
+        pytest.skip("this platform reads out-of-range timestamps quite happily")
 
     stats = run_app(dry_run=False, operation="move")
     check(stats['errors'] == 0,

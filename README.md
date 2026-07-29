@@ -207,7 +207,7 @@ pip3 install -r requirements-dev.txt
 python -m pytest tests/ -q
 ```
 
-106 tests, 415 checks. They build real photos and videos in a temporary folder
+107 tests, 419 checks. They build real photos and videos in a temporary folder
 and run the real code against them, so a passing run means the real thing
 works - not a simplified copy of it. Every test starts from a clean folder, so
 you can run just the one you care about:
