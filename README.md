@@ -3,7 +3,7 @@
 **Turns an unknown, messy media collection into a clean, understood archive you
 can merge into long-term storage with confidence.**
 
-> **v4.2 is the current release** and supersedes v34, which shipped under the
+> **v4.3 is the current release** and supersedes v34, which shipped under the
 > project's former name, Kjegla's Photo Organizer. Despite the lower number,
 > v4 is newer: it is a new architectural generation rather than the next
 > increment. See [STATUS.md](STATUS.md) for what changed.
@@ -98,6 +98,13 @@ is worth more than one where things were guessed into place.
 | `archiveprep_duplicates_*.txt` | Every set of identical files and which copy was kept |
 | `archiveprep_health_*.txt` | From **Check Files**, which moves nothing |
 
+The log in the window has a **Find** box under it. Type any part of a filename
+and every occurrence is highlighted where it sits, with a count and
+**Previous** / **Next** to step between them - so "what happened to this one
+file?" is answered without opening the `.txt`. It keeps counting while a run is
+still printing, and it does not scroll the log out from under you while it
+does. `Ctrl+F` jumps to it, `Enter` and `Shift+Enter` step, `Esc` clears it.
+
 ## Maintenance extras
 
 Some things the application can do because it is already reading file headers,
@@ -188,7 +195,7 @@ pip3 install -r requirements-dev.txt
 python -m pytest tests/ -q
 ```
 
-95 tests, 345 checks. They build real photos and videos in a temporary folder
+104 tests, 409 checks. They build real photos and videos in a temporary folder
 and run the real code against them, so a passing run means the real thing
 works - not a simplified copy of it. Every test starts from a clean folder, so
 you can run just the one you care about:

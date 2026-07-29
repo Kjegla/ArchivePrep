@@ -166,6 +166,82 @@ def test_the_defaults_the_window_opens_with(tk_root):
         root.destroy()
 
 
+def test_log_search_highlights_every_match_and_steps_between_them(tk_root):
+    """The log is where you answer "what happened to this file?" during a run.
+
+    Searching it must actually mark the text - a count alone would leave you
+    scrolling for the line it counted.
+    """
+    import tkinter as tk
+    root = tk.Toplevel(tk_root)
+    root.withdraw()
+    app = ap.ArchivePrepGUI(root)
+    try:
+        app.output_text.insert(tk.END,
+                               "[moved] IMG_0001.jpg\n"
+                               "[skip] IMG_0002.jpg identical\n"
+                               "[duplicate] IMG_0001 (1).jpg\n")
+
+        app.log_search.set("IMG_0001")
+        check(len(app._matches) == 2,
+              f"both occurrences found (got {len(app._matches)})")
+        check(app.match_label.cget('text') == "1 of 2",
+              f"the count is shown (got {app.match_label.cget('text')!r})")
+        check(app.output_text.tag_ranges('match') != (),
+              "the matches are tinted in the widget, not merely counted")
+
+        first = str(app.output_text.tag_ranges('match_current')[0])
+        app._step_match(1)
+        check(app.match_label.cget('text') == "2 of 2", "Next advances the count")
+        check(str(app.output_text.tag_ranges('match_current')[0]) != first,
+              "and moves the highlight that marks where you are")
+        app._step_match(1)
+        check(app.match_label.cget('text') == "1 of 2", "Next wraps at the end")
+        app._step_match(-1)
+        check(app.match_label.cget('text') == "2 of 2", "Previous wraps the other way")
+
+        app.log_search.set("img_0002")
+        check(len(app._matches) == 1,
+              f"searching ignores case (got {len(app._matches)})")
+
+        app.log_search.set("no such line")
+        check(app._matches == [] and app.match_label.cget('text') == "no matches",
+              "a term that is not there says so rather than staying silent")
+
+        app.log_search.set("")
+        check(app.output_text.tag_ranges('match') == (),
+              "emptying the box takes the highlight off again")
+    finally:
+        root.destroy()
+
+
+def test_log_search_keeps_up_while_a_run_is_still_printing(tk_root):
+    """A search started mid-run must count lines that arrive after it, and
+    must not yank the log back to the first match while it does."""
+    import tkinter as tk
+    root = tk.Toplevel(tk_root)
+    root.withdraw()
+    app = ap.ArchivePrepGUI(root)
+    try:
+        app.output_text.insert(tk.END, "[moved] a.jpg\n[moved] b.jpg\n")
+        app.log_search.set("moved")
+        app._step_match(1)
+        check(app.match_label.cget('text') == "2 of 2", "sitting on the second match")
+
+        app.output_text.insert(tk.END, "[moved] c.jpg\n")
+        app._highlight_matches(keep_position=True)
+        check(len(app._matches) == 3,
+              f"the new line was counted too (got {len(app._matches)})")
+        check(app.match_label.cget('text') == "2 of 3",
+              f"without jumping back to the first (got "
+              f"{app.match_label.cget('text')!r})")
+
+        app.clear_log()
+        check(app._matches == [], "clearing the log clears the search with it")
+    finally:
+        root.destroy()
+
+
 def test_cancel_reaches_the_core(tk_root):
     """Cancel works by setting an event the core polls; prove the window's
     button is wired to the same event the core is handed."""

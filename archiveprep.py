@@ -56,6 +56,11 @@ class ArchivePrepGUI:
         # headers. It was never one of the problems this exists to solve, so
         # it should not be something you have to notice and switch off.
         self.fix_extensions = tk.BooleanVar(value=False)
+        # Log search state: where every match starts, and which one Next and
+        # Previous are currently sitting on.
+        self.log_search = tk.StringVar()
+        self._matches = []
+        self._match_index = -1
         self.processing = False
         self.last_undo_file = None
         self.last_rename_undo_file = None  # undo for the extension fixes alone
@@ -297,10 +302,108 @@ class ArchivePrepGUI:
                                                      borderwidth=0)
         self.output_text.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
 
-        ttk.Button(output_frame, text="Clear Log",
-                   command=self.clear_log).grid(row=1, column=0, pady=5)
+        # Finding a line without leaving the window. A run against a real
+        # archive prints thousands of lines, and until now the only way to
+        # answer "what happened to this one file?" was to open the .txt on
+        # disk - which is the log you go to afterwards, not the one in front
+        # of you.
+        search_frame = ttk.Frame(output_frame)
+        search_frame.grid(row=1, column=0, sticky=(tk.W, tk.E), pady=(5, 0))
+
+        ttk.Label(search_frame, text="Find:").pack(side=tk.LEFT)
+        self.log_search.trace_add('write', lambda *_: self._highlight_matches())
+        search_entry = ttk.Entry(search_frame, textvariable=self.log_search,
+                                 width=32)
+        search_entry.pack(side=tk.LEFT, padx=(4, 6))
+        search_entry.bind('<Return>', lambda _e: self._step_match(1))
+        search_entry.bind('<Shift-Return>', lambda _e: self._step_match(-1))
+        search_entry.bind('<Escape>', lambda _e: self.log_search.set(''))
+
+        ttk.Button(search_frame, text="Previous", width=10,
+                   command=lambda: self._step_match(-1)).pack(side=tk.LEFT)
+        ttk.Button(search_frame, text="Next", width=10,
+                   command=lambda: self._step_match(1)).pack(side=tk.LEFT,
+                                                             padx=(4, 8))
+
+        self.match_label = ttk.Label(search_frame, text="")
+        self.match_label.pack(side=tk.LEFT)
+
+        ttk.Button(search_frame, text="Clear Log",
+                   command=self.clear_log).pack(side=tk.RIGHT)
+
+        # Every match is tinted, and the one being stepped through is tinted
+        # more strongly - otherwise Next and Previous have nothing visible to
+        # move between.
+        self.output_text.tag_config('match', background='#ffe9a3')
+        self.output_text.tag_config('match_current', background='#ffab2e')
+        self.output_text.tag_raise('match_current', 'match')
+
+        self.root.bind('<Control-f>', lambda _e: self._focus_search(search_entry))
 
         main_frame.rowconfigure(6, weight=1)
+
+    def _focus_search(self, entry):
+        """Ctrl+F puts the cursor in the find box with the old term selected."""
+        entry.focus_set()
+        entry.select_range(0, tk.END)
+
+    def _highlight_matches(self, keep_position=False):
+        """Tint every occurrence of the search term in the log.
+
+        Called on every keystroke, and again whenever new lines arrive while a
+        search is active - so the count stays true during a run rather than
+        going stale the moment the log grows.
+        """
+        self.output_text.tag_remove('match', '1.0', tk.END)
+        self.output_text.tag_remove('match_current', '1.0', tk.END)
+
+        needle = self.log_search.get()
+        self._matches = []
+        if not needle:
+            self.match_label.config(text="")
+            self._match_index = -1
+            return
+
+        idx = '1.0'
+        while True:
+            hit = self.output_text.search(needle, idx, stopindex=tk.END,
+                                          nocase=True)
+            if not hit:
+                break
+            end = f"{hit}+{len(needle)}c"
+            self.output_text.tag_add('match', hit, end)
+            self._matches.append(hit)
+            idx = end
+
+        if not self._matches:
+            self.match_label.config(text="no matches")
+            self._match_index = -1
+            return
+
+        # Typing jumps to the first match; new lines arriving mid-run must not,
+        # or the log would yank itself around while you are reading it.
+        if not keep_position or not 0 <= self._match_index < len(self._matches):
+            self._match_index = 0
+            keep_position = False
+        self._show_current_match(scroll=not keep_position)
+
+    def _show_current_match(self, scroll=True):
+        """Mark which match Next and Previous are sitting on, and count them."""
+        self.output_text.tag_remove('match_current', '1.0', tk.END)
+        start = self._matches[self._match_index]
+        self.output_text.tag_add('match_current', start,
+                                 f"{start}+{len(self.log_search.get())}c")
+        if scroll:
+            self.output_text.see(start)
+        self.match_label.config(
+            text=f"{self._match_index + 1} of {len(self._matches)}")
+
+    def _step_match(self, direction):
+        """Move to the next or previous match, wrapping at either end."""
+        if not self._matches:
+            return
+        self._match_index = (self._match_index + direction) % len(self._matches)
+        self._show_current_match()
 
     def _sync_thorough_state(self):
         """The thorough toggle only means anything when checking is switched on."""
@@ -394,6 +497,10 @@ class ArchivePrepGUI:
     def clear_log(self):
         """Clear the output log."""
         self.output_text.delete(1.0, tk.END)
+        self._matches = []
+        self._match_index = -1
+        self.match_label.config(text="" if not self.log_search.get()
+                                else "no matches")
 
     def log(self, message):
         """Add message to output log."""
@@ -458,6 +565,8 @@ class ArchivePrepGUI:
             if line_count > 6000:
                 self.output_text.delete('1.0', f'{line_count - 5000}.0')
             self.output_text.see(tk.END)
+            if self.log_search.get():
+                self._highlight_matches(keep_position=True)
         if last_status is not None:
             self.status_label.config(text=last_status)
         if last_progress is not None:
