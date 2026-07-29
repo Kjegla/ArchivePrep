@@ -468,36 +468,56 @@ class ArchivePrepGUI:
         self.root.after(100, self.check_queue)
 
     def _offer_to_clear_leftovers(self, folders):
-        """Ask whether to delete the operating system's own leftover caches.
+        """Ask whether to delete what the archive left behind.
 
         The only place this application deletes a file, and it never happens
-        without this question being answered yes. Everything it offers to
-        remove is a cache the system recreates when it wants it - never a
-        sidecar like .aae or .xmp, which hold real information about a photo
-        that nothing would bring back.
+        without being asked. Two questions rather than one: caches an
+        operating system regenerates are a different decision from sidecars it
+        does not, and bundling them would let one click discard something
+        nothing brings back.
         """
-        names = sorted({e.name for _folder, entries in folders
-                        for e in entries})
+        entries = [e for _folder, es in folders for e in es]
+        caches = [e for e in entries if core.is_regenerable_leftover(e)]
+        sidecars = [e for e in entries if core.is_inert_sidecar(e)]
+
         listed = "\n".join(f"  {f.name}" for f, _ in folders[:15])
         if len(folders) > 15:
             listed += f"\n  ... and {len(folders) - 15} more"
 
-        if not messagebox.askyesno(
-                "Leftover folders",
-                f"{len(folders)} folder(s) are now empty apart from files "
-                f"Windows or macOS regenerate by themselves "
-                f"({', '.join(names)}).\n\n"
-                f"{listed}\n\n"
-                f"They look empty in Explorer because those files are hidden.\n\n"
-                f"Delete those files and remove the folders?\n\n"
-                f"Nothing else is touched, and these are the only files this "
-                f"application will ever delete."):
+        parts = [f"{len(folders)} folder(s) hold nothing your archive wants:",
+                 "", listed, ""]
+        if caches:
+            kinds = ", ".join(sorted({e.name for e in caches}))
+            parts.append(f"{len(caches)} file(s) Windows or macOS regenerate "
+                         f"by themselves ({kinds}). These are why the folders "
+                         f"look empty in Explorer - the files are hidden.")
+        if sidecars:
+            kinds = ", ".join(sorted({e.suffix.lower() for e in sidecars}))
+            parts.append(f"{len(sidecars)} sidecar file(s) ({kinds}) whose "
+                         f"photo has already moved to the archive.")
+        parts += ["", "Delete them and remove the folders?"]
+
+        if not messagebox.askyesno("Leftover folders", "\n".join(parts)):
             return
 
+        include_sidecars = False
+        if sidecars:
+            kinds = ", ".join(sorted({e.suffix.lower() for e in sidecars}))
+            include_sidecars = messagebox.askyesno(
+                "Sidecar files",
+                f"Also delete the {len(sidecars)} sidecar file(s) ({kinds})?\n\n"
+                f"An .aae holds the edits you made in Apple Photos. Nothing "
+                f"outside Apple reads it - not Windows, not a NAS, not Immich "
+                f"- and if you exported edited copies, those edits are already "
+                f"in the photo itself.\n\n"
+                f"Unlike the caches, nothing regenerates these. Answer No and "
+                f"they stay exactly where they are, along with their folders.")
+
         def work(progress):
-            deleted, removed = core.remove_leftovers(folders, progress)
+            deleted, removed = core.remove_leftovers(
+                folders, progress, include_sidecars=include_sidecars)
             progress.log(f"\nRemoved {removed} folder(s) and {deleted} "
-                         f"regenerable file(s)")
+                         f"leftover file(s)")
 
         self._run_in_background(work)
 

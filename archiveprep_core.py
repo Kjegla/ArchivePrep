@@ -2140,14 +2140,34 @@ def _sweep_empty_dirs(source_root, log_file=None):
 # edit data, ratings, geolocation - and nothing regenerates them.
 REGENERABLE_LEFTOVERS = {'thumbs.db', 'ehthumbs.db', 'desktop.ini', '.ds_store'}
 
+# Sidecars that only the device which wrote them can read. An .aae is Apple's
+# adjustment data - the edits you made in Photos - and nothing outside Apple's
+# ecosystem understands it: not Windows, not a NAS, not Immich. A .thm is a
+# camcorder's thumbnail for its own browser. Once the photo has moved to an
+# archive, neither travels with any meaning.
+#
+# Deliberately NOT here, and each for its own reason:
+#   .xmp   Lightroom and darktable read these, and they hold ratings and edits
+#          that are actively used outside the camera.
+#   .json  ArchivePrep itself reads these for a capture date Google stripped
+#          from the file. Deleting them would degrade a later re-run.
+INERT_SIDECARS = {'.aae', '.thm'}
 
-def _is_regenerable_leftover(path):
+
+def is_regenerable_leftover(path):
     """True if a file is an operating system's own cache, not the user's data."""
     return path.name.lower() in REGENERABLE_LEFTOVERS or is_appledouble(path)
 
 
+def is_inert_sidecar(path):
+    """True if a file describes a photo but only its originating device can
+    read it - so once the photo is archived elsewhere, it means nothing."""
+    return path.suffix.lower() in INERT_SIDECARS
+
+
 def find_leftover_only_folders(source_root):
-    """Folders holding nothing but files an operating system regenerates.
+    """Folders holding nothing the archive wants: caches, or sidecars whose
+    photo has already been moved away.
 
     After a move these look empty in Explorer and in `dir` - Thumbs.db is
     hidden - but the sweep correctly refuses to touch them, because a folder
@@ -2166,18 +2186,25 @@ def find_leftover_only_folders(source_root):
             entries = list(folder.iterdir())
         except OSError:
             continue
-        if entries and all(e.is_file() and _is_regenerable_leftover(e)
+        if entries and all(e.is_file() and (is_regenerable_leftover(e)
+                                            or is_inert_sidecar(e))
                            for e in entries):
             found.append((folder, entries))
     return found
 
 
-def remove_leftovers(folders, progress):
-    """Delete the regenerable files in these folders, then the folders.
+def remove_leftovers(folders, progress, include_sidecars=False):
+    """Delete leftover files in these folders, then the folders themselves.
 
     The only place this application deletes a file, and it runs only after the
-    user has been shown the list and said yes. Everything it removes is a
-    cache the operating system will recreate when it wants it.
+    user has been shown the list and said yes.
+
+    Caches go by default - the operating system recreates them on demand.
+    Sidecars are a separate decision the window asks separately, because they
+    are not regenerable: an .aae is only redundant once you know the edits are
+    already baked into the exported photo, and that is the user's knowledge,
+    not ours. A folder is only removed once it is genuinely empty, so
+    declining the sidecars leaves both them and their folder alone.
 
     Returns (files_deleted, folders_removed).
     """
@@ -2185,12 +2212,13 @@ def remove_leftovers(folders, progress):
     for folder, entries in folders:
         try:
             for entry in entries:
-                if not _is_regenerable_leftover(entry):
-                    continue  # belt and braces: never widen past the list
-                entry.unlink()
-                files_deleted += 1
-            folder.rmdir()
-            folders_removed += 1
+                if is_regenerable_leftover(entry) or (
+                        include_sidecars and is_inert_sidecar(entry)):
+                    entry.unlink()
+                    files_deleted += 1
+            if not any(folder.iterdir()):
+                folder.rmdir()
+                folders_removed += 1
         except OSError as e:
             progress.log(f"  [warn] could not clear {folder.name}: {e}")
     return files_deleted, folders_removed

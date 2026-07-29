@@ -115,12 +115,22 @@ kept because they are useful - not because they are what it is for:
   your files do not count.
 
   Those folders look empty in Explorer, since `Thumbs.db` is hidden. So when a
-  folder is left holding nothing but files the operating system regenerates
-  by itself — `Thumbs.db`, `desktop.ini`, `.DS_Store`, macOS `._` stubs — you
-  are told, and asked whether to clear them. **That prompt is the only place
-  this application ever deletes a file**, it only ever offers caches the system
-  recreates on demand, and it never offers a sidecar like `.aae` or `.xmp`,
-  which hold real information about a photo that nothing would bring back.
+  folder is left holding nothing your archive wants, you are told and asked
+  whether to clear it. **That prompt is the only place this application ever
+  deletes a file**, and it asks twice, because two different things get left
+  behind:
+
+  - **Caches the system regenerates** — `Thumbs.db`, `desktop.ini`,
+    `.DS_Store`, macOS `._` stubs. Deleting one loses nothing.
+  - **Sidecars only their own device can read** — `.aae`, `.thm`. An `.aae`
+    holds the edits you made in Apple Photos; nothing outside Apple reads it,
+    not Windows, not a NAS, not Immich. Nothing regenerates it either, so it
+    is a **separate question** you can answer no to — and if you do, the file
+    and its folder both stay.
+
+  Never offered at all: `.xmp`, which Lightroom and darktable actively read,
+  and Takeout's `.json`, which ArchivePrep itself reads for a capture date
+  Google stripped from the photo.
 
 ## When something cannot be moved
 
