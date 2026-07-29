@@ -1970,9 +1970,10 @@ def organize_photos(settings, progress, dry_run=True):
         undo_entries, rename_entries = [], []
         if not dry_run:
             _journal_start(undo_path, operation, source_path)
-            undo_entries, rename_entries = _apply_plan(
+            undo_entries, rename_entries, failures = _apply_plan(
                 ctx.ops, source_path, progress, stats, log_file, undo_path,
-                p0=80, p1=100)
+                records=records, p0=80, p1=100)
+            _report_failures(failures, source_path, progress, log_file)
 
             if undo_entries:
                 progress.notify("undo_available", str(undo_path))
@@ -1994,6 +1995,7 @@ def organize_photos(settings, progress, dry_run=True):
                 stats['empty_folders_removed'] = removed
                 if removed:
                     progress.log(f"\nRemoved {removed} empty folder(s)")
+                _note_leftover_folders(source_path, progress, log_file)
 
         duration = (datetime.now() - start_time).total_seconds()
         stats['duration_seconds'] = duration
@@ -2122,9 +2124,76 @@ def _sweep_empty_dirs(source_root, log_file=None):
                 if log_file:
                     log_file.write(f"Removed empty folder: "
                                    f"{folder.relative_to(source_root)}\n")
-        except OSError:
-            pass  # in use, permission denied, or raced - just leave it
+        except OSError as e:
+            # In use, permission denied, or raced. Say so rather than leaving
+            # the user with a folder that looks empty and no reason why.
+            if log_file:
+                log_file.write(f"Could not remove empty folder "
+                               f"{folder.relative_to(source_root)}: {e}\n")
     return removed
+
+
+# Files an operating system regenerates by itself. Nothing is lost by deleting
+# one, which is the entire reason this list exists and is the only reason the
+# user is ever offered the option. Deliberately excluded: .aae, .xmp and
+# .json. Those are sidecars holding real information about a photo - Apple's
+# edit data, ratings, geolocation - and nothing regenerates them.
+REGENERABLE_LEFTOVERS = {'thumbs.db', 'ehthumbs.db', 'desktop.ini', '.ds_store'}
+
+
+def _is_regenerable_leftover(path):
+    """True if a file is an operating system's own cache, not the user's data."""
+    return path.name.lower() in REGENERABLE_LEFTOVERS or is_appledouble(path)
+
+
+def find_leftover_only_folders(source_root):
+    """Folders holding nothing but files an operating system regenerates.
+
+    After a move these look empty in Explorer and in `dir` - Thumbs.db is
+    hidden - but the sweep correctly refuses to touch them, because a folder
+    with a file in it is not empty and this application does not decide which
+    of your files do not count.
+
+    Returned so the window can *ask*. Nothing here deletes anything.
+    """
+    found = []
+    source_root = Path(source_root)
+    for dirpath, _dirs, _names in os.walk(source_root, topdown=False):
+        folder = Path(dirpath)
+        if folder == source_root:
+            continue
+        try:
+            entries = list(folder.iterdir())
+        except OSError:
+            continue
+        if entries and all(e.is_file() and _is_regenerable_leftover(e)
+                           for e in entries):
+            found.append((folder, entries))
+    return found
+
+
+def remove_leftovers(folders, progress):
+    """Delete the regenerable files in these folders, then the folders.
+
+    The only place this application deletes a file, and it runs only after the
+    user has been shown the list and said yes. Everything it removes is a
+    cache the operating system will recreate when it wants it.
+
+    Returns (files_deleted, folders_removed).
+    """
+    files_deleted = folders_removed = 0
+    for folder, entries in folders:
+        try:
+            for entry in entries:
+                if not _is_regenerable_leftover(entry):
+                    continue  # belt and braces: never widen past the list
+                entry.unlink()
+                files_deleted += 1
+            folder.rmdir()
+            folders_removed += 1
+        except OSError as e:
+            progress.log(f"  [warn] could not clear {folder.name}: {e}")
+    return files_deleted, folders_removed
 
 
 def _claimed(ctx, path):
@@ -2346,8 +2415,91 @@ def _plan_one_file(mf, source_path, settings, base_name_to_model, ctx,
         ctx.stats['processed'] += 1
 
 
+def _note_leftover_folders(source_path, progress, log_file):
+    """Say which folders were left holding only an operating system's cache,
+    and hand the list to the window so it can offer to clear them.
+
+    These look empty in Explorer, because Thumbs.db is hidden, and empty to
+    `dir` for the same reason - so being left behind with no explanation is
+    genuinely baffling. Nothing is deleted here.
+    """
+    leftovers = find_leftover_only_folders(source_path)
+    if not leftovers:
+        return
+    progress.log(f"\n{len(leftovers)} folder(s) are empty apart from files "
+                 f"Windows or macOS regenerate by themselves:")
+    log_file.write(f"\n{len(leftovers)} folder(s) left holding only "
+                   f"regenerable files\n")
+    for folder, entries in leftovers[:20]:
+        names = ", ".join(sorted(e.name for e in entries))
+        rel = folder.relative_to(source_path)
+        progress.log(f"  {rel}  ({names})")
+        log_file.write(f"  {rel}: {names}\n")
+    if len(leftovers) > 20:
+        progress.log(f"  ... and {len(leftovers) - 20} more")
+    progress.log("They were left alone because a folder with a file in it is "
+                 "not empty,")
+    progress.log("and this application does not decide which of your files do "
+                 "not count.")
+    progress.notify("leftover_folders", leftovers)
+
+
+def _report_failures(failures, source_path, progress, log_file):
+    """Gather what went wrong into one block at the end of the run.
+
+    Individual errors scroll past in the middle of hundreds of successful
+    moves, and a summary line saying "Errors: 17" leaves the user to scroll
+    back and work out what they have in common. This says it once, at the
+    end, where it will be read.
+    """
+    if not failures:
+        return
+
+    denied = [(p, e) for p, e in failures if isinstance(e, PermissionError)
+              or getattr(e, 'winerror', None) == 5]
+    other = [(p, e) for p, e in failures if (p, e) not in denied]
+
+    progress.log("\n" + "=" * 60)
+    progress.log(f"{len(failures)} file(s) could not be moved and are still "
+                 f"where they were:")
+    log_file.write(f"\n{len(failures)} FILE(S) COULD NOT BE MOVED\n")
+
+    if denied:
+        progress.log(f"\n  {len(denied)} refused by Windows (access denied).")
+        progress.log("  This usually means the files were copied from another "
+                     "computer and")
+        progress.log("  still carry that computer's permissions - your account "
+                     "can read them")
+        progress.log("  but not move them. Deleting one in Explorer would "
+                     "raise a UAC prompt;")
+        progress.log("  this application does not ask for administrator "
+                     "rights and will not")
+        progress.log("  change permissions on your files by itself.")
+        progress.log("\n  To take ownership, in an administrator terminal:")
+        folder = denied[0][0].parent
+        progress.log(f'    takeown /F "{folder}" /R /D Y')
+        progress.log(f'    icacls "{folder}" /grant "%USERNAME%":(OI)(CI)F /T')
+
+    for label, group in (("access denied", denied), ("other errors", other)):
+        if not group:
+            continue
+        progress.log(f"\n  {label}:")
+        for path, err in group[:20]:
+            try:
+                shown = path.relative_to(source_path)
+            except ValueError:
+                shown = path
+            progress.log(f"    {shown}")
+            log_file.write(f"  {shown}: {err}\n")
+        if len(group) > 20:
+            progress.log(f"    ... and {len(group) - 20} more "
+                         f"(the full list is in the log file)")
+            for path, err in group[20:]:
+                log_file.write(f"  {path}: {err}\n")
+
+
 def _apply_plan(ops, source_path, progress, stats, log_file, undo_path,
-                p0=60, p1=100):
+                records=None, p0=60, p1=100):
     """Carry out a plan. The only code in the application that moves a file.
 
     Preview and Execute run exactly the same decisions and then either stop
@@ -2355,13 +2507,19 @@ def _apply_plan(ops, source_path, progress, stats, log_file, undo_path,
     They used to be separate engines, and had already grown different
     collision handling.
 
-    Returns (undo_entries, rename_entries).
+    `records` lets a failure be written back onto the file's record, so the
+    manifest says what happened rather than what was intended. Without it a
+    file that could not be moved was still listed as organized, at a target
+    it never reached - which is the one thing a record of the run must never
+    do. A cached replay has no records, so it passes None.
+
+    Returns (undo_entries, rename_entries, failures).
     """
-    undo_entries, rename_entries = [], []
+    undo_entries, rename_entries, failures = [], [], []
     total = len(ops)
     if not total:
         progress.percent(p1)
-        return undo_entries, rename_entries
+        return undo_entries, rename_entries, failures
 
     operation_text = {"move": "Moving", "copy": "Copying"}
     phase_start = time.monotonic()
@@ -2439,9 +2597,16 @@ def _apply_plan(ops, source_path, progress, stats, log_file, undo_path,
             progress.log(f"  [error] {source.name}: {e}")
             log_file.write(f"  FILE OPERATION ERROR {source}: {e}\n")
             stats['errors'] += 1
+            failures.append((source, e))
+            # The manifest is the record of what happened, so a file that did
+            # not move must not be listed as though it did.
+            mf = (records or {}).get(source)
+            if mf is not None:
+                mf.action, mf.target = 'failed', None
+                mf.reason = str(e)
 
     progress.percent(p1)
-    return undo_entries, rename_entries
+    return undo_entries, rename_entries, failures
 
 
 def execute_cached_plan(plan, settings, progress):
@@ -2499,8 +2664,9 @@ def execute_cached_plan(plan, settings, progress):
         log_file.write("=" * 60 + "\n\n")
 
         _journal_start(undo_path, operation, source_path)
-        undo_entries, rename_entries = _apply_plan(
+        undo_entries, rename_entries, failures = _apply_plan(
             ops, source_path, progress, stats, log_file, undo_path, p0=0, p1=100)
+        _report_failures(failures, source_path, progress, log_file)
 
         if undo_entries:
             progress.notify("undo_available", str(undo_path))
@@ -2520,6 +2686,7 @@ def execute_cached_plan(plan, settings, progress):
             stats['empty_folders_removed'] = removed
             if removed:
                 progress.log(f"\nRemoved {removed} empty folder(s)")
+            _note_leftover_folders(source_path, progress, log_file)
 
         duration = (datetime.now() - start_time).total_seconds()
         stats['duration_seconds'] = duration

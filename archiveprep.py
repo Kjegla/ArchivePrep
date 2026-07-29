@@ -51,7 +51,11 @@ class ArchivePrepGUI:
         self.check_corrupt = tk.BooleanVar(value=False)
         self.corrupt_thorough = tk.BooleanVar(value=False)
         self.cleanup_empty = tk.BooleanVar(value=True)
-        self.fix_extensions = tk.BooleanVar(value=True)
+        # Off by default: repairing extensions is a maintenance extra the
+        # application happens to be capable of because it already reads file
+        # headers. It was never one of the problems this exists to solve, so
+        # it should not be something you have to notice and switch off.
+        self.fix_extensions = tk.BooleanVar(value=False)
         self.processing = False
         self.last_undo_file = None
         self.last_rename_undo_file = None  # undo for the extension fixes alone
@@ -408,6 +412,7 @@ class ArchivePrepGUI:
         log_lines = []
         last_status = None
         last_progress = None
+        leftover_folders = None
         try:
             while True:
                 action, value, extra = self.queue.get_nowait()
@@ -440,6 +445,8 @@ class ArchivePrepGUI:
                     self.last_rename_undo_file = value
                 elif action == "plan_stale":
                     self.cached_plan = None
+                elif action == "leftover_folders":
+                    leftover_folders = value
 
         except queue.Empty:
             pass
@@ -455,8 +462,44 @@ class ArchivePrepGUI:
             self.status_label.config(text=last_status)
         if last_progress is not None:
             self.progress_var.set(last_progress)
+        if leftover_folders:
+            self._offer_to_clear_leftovers(leftover_folders)
 
         self.root.after(100, self.check_queue)
+
+    def _offer_to_clear_leftovers(self, folders):
+        """Ask whether to delete the operating system's own leftover caches.
+
+        The only place this application deletes a file, and it never happens
+        without this question being answered yes. Everything it offers to
+        remove is a cache the system recreates when it wants it - never a
+        sidecar like .aae or .xmp, which hold real information about a photo
+        that nothing would bring back.
+        """
+        names = sorted({e.name for _folder, entries in folders
+                        for e in entries})
+        listed = "\n".join(f"  {f.name}" for f, _ in folders[:15])
+        if len(folders) > 15:
+            listed += f"\n  ... and {len(folders) - 15} more"
+
+        if not messagebox.askyesno(
+                "Leftover folders",
+                f"{len(folders)} folder(s) are now empty apart from files "
+                f"Windows or macOS regenerate by themselves "
+                f"({', '.join(names)}).\n\n"
+                f"{listed}\n\n"
+                f"They look empty in Explorer because those files are hidden.\n\n"
+                f"Delete those files and remove the folders?\n\n"
+                f"Nothing else is touched, and these are the only files this "
+                f"application will ever delete."):
+            return
+
+        def work(progress):
+            deleted, removed = core.remove_leftovers(folders, progress)
+            progress.log(f"\nRemoved {removed} folder(s) and {deleted} "
+                         f"regenerable file(s)")
+
+        self._run_in_background(work)
 
     def _snapshot_settings(self):
         """Read all tkinter variables on the main thread into a plain object.

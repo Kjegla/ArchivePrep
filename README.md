@@ -103,13 +103,37 @@ is worth more than one where things were guessed into place.
 Some things the application can do because it is already reading file headers,
 kept because they are useful - not because they are what it is for:
 
-- **Wrong file extensions.** A JPEG saved as `.MOV` will not open at all,
-  because your computer hands it to a video player. A WEBP saved as `.png`
-  opens everywhere and is harmless. Both are reported, and the reports say
-  which is which. Files are renamed to the extension they should have had and
-  set aside in `Wrong Extension\`, with their own undo.
-- **Empty folder cleanup** after a move. Only genuinely empty folders; a folder
-  holding so much as a stray `Thumbs.db` is left alone.
+- **Wrong file extensions** — *off by default.* A JPEG saved as `.MOV` will not
+  open at all, because your computer hands it to a video player. A WEBP saved
+  as `.png` opens everywhere and is harmless. Both are reported, and the
+  reports say which is which. Switch it on and files are renamed to the
+  extension they should have had and set aside in `Wrong Extension\`, with
+  their own undo.
+- **Empty folder cleanup** after a move. Only genuinely empty folders — a
+  folder holding so much as a stray `Thumbs.db` is left alone, because a folder
+  with a file in it is not empty and this application does not decide which of
+  your files do not count.
+
+  Those folders look empty in Explorer, since `Thumbs.db` is hidden. So when a
+  folder is left holding nothing but files the operating system regenerates
+  by itself — `Thumbs.db`, `desktop.ini`, `.DS_Store`, macOS `._` stubs — you
+  are told, and asked whether to clear them. **That prompt is the only place
+  this application ever deletes a file**, it only ever offers caches the system
+  recreates on demand, and it never offers a sidecar like `.aae` or `.xmp`,
+  which hold real information about a photo that nothing would bring back.
+
+## When something cannot be moved
+
+Files copied from another computer often still carry that computer's
+permissions. Your account can read them but not move them, and Windows refuses
+with *access denied* — the same files delete fine in Explorer only because it
+raises a UAC prompt and quietly uses your administrator rights.
+
+ArchivePrep does not ask for administrator rights and will not change
+permissions on your files by itself. It reports every file it could not move,
+in one block at the end of the run, and gives you the two commands that fix it.
+Those files stay exactly where they were, and the manifest records them as
+`failed` rather than pretending they arrived.
 
 ## Install
 

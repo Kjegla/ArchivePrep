@@ -139,6 +139,33 @@ def test_preview_caches_a_plan_and_execute_consumes_it(tk_root):
         root.destroy()
 
 
+def test_the_defaults_the_window_opens_with(tk_root):
+    """What a first-time user gets without touching anything.
+
+    Extension repair in particular must be off: it was never one of the
+    problems this application exists to solve, and a maintenance extra should
+    not be something you have to notice and switch off.
+    """
+    import tkinter as tk
+    root = tk.Toplevel(tk_root)
+    root.withdraw()
+    app = ap.ArchivePrepGUI(root)
+    try:
+        s = app._snapshot_settings()
+        check(s.fix_extensions is False,
+              f"extension repair is off by default (got {s.fix_extensions})")
+        check(s.operation == "move", f"operation defaults to move (got {s.operation})")
+        check(s.dedupe_content is True,
+              "finding duplicates by content is on - it is a core capability")
+        check(s.check_corrupt is False,
+              "the damage check is off by default; it is the slower path")
+        check(s.cleanup_empty is True, "empty folders are swept after a move")
+        check(s.include_subfolders is False,
+              "subfolders are not scanned unless asked for")
+    finally:
+        root.destroy()
+
+
 def test_cancel_reaches_the_core(tk_root):
     """Cancel works by setting an event the core polls; prove the window's
     button is wired to the same event the core is handed."""

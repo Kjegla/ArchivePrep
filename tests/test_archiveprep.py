@@ -1019,6 +1019,104 @@ def test_a_video_is_only_redundant_when_it_really_is_inside_the_photo():
           f"nothing was called redundant on the strength of its name (got {files})")
 
 
+def test_manifest_records_a_failure_rather_than_the_intention():
+    """The manifest is the record of what happened. A file that could not be
+    moved must not be listed as organized at a target it never reached - that
+    is the one thing a record of a run must never do."""
+    import csv
+    make_img(SCRATCH / "fine.jpg", model="SM-S918B", date="2023:05:10 14:30:00")
+    make_img(SCRATCH / "locked.jpg", model="SM-S918B", date="2023:05:11 09:00:00",
+             color='green')
+
+    real_transfer = core.transfer_file
+
+    def deny_one(src, dst, operation):
+        if src.name == "locked.jpg":
+            raise PermissionError(5, "Access is denied", str(src))
+        return real_transfer(src, dst, operation)
+
+    core.transfer_file = deny_one
+    try:
+        stats = run_app(dry_run=False, operation="move")
+    finally:
+        core.transfer_file = real_transfer
+
+    check(stats['errors'] == 1, f"the failure was counted (got {stats['errors']})")
+    check((SCRATCH / "locked.jpg").exists(), "the file is still where it was")
+
+    manifest = list(SCRATCH.glob("archiveprep_manifest_*.csv"))[0]
+    rows = {Path(r['original_path']).name: r for r in
+            csv.DictReader(manifest.read_text(encoding='utf-8').splitlines())}
+    check(rows['locked.jpg']['action'] == 'failed',
+          f"the manifest says it failed (got {rows['locked.jpg']['action']!r})")
+    check(rows['locked.jpg']['target_path'] == '',
+          f"...and claims no destination (got "
+          f"{rows['locked.jpg']['target_path']!r})")
+    check('denied' in rows['locked.jpg']['reason'].lower(),
+          f"...and says why (got {rows['locked.jpg']['reason']!r})")
+    check(rows['fine.jpg']['action'] == 'organize',
+          "the file that did move is still recorded as organized")
+
+
+def test_folders_left_holding_only_regenerable_files_are_found():
+    """Thumbs.db is hidden, so these folders look empty in Explorer and to
+    `dir`, and being left behind with no explanation is baffling."""
+    (SCRATCH / "camera").mkdir()
+    (SCRATCH / "camera" / "Thumbs.db").write_bytes(b"\x00" * 400)
+    (SCRATCH / "mac").mkdir()
+    (SCRATCH / "mac" / ".DS_Store").write_bytes(b"\x00\x00\x00\x01Bud1")
+    (SCRATCH / "mac" / "._IMG_1.jpg").write_bytes(core.APPLEDOUBLE_MAGIC + bytes(80))
+    (SCRATCH / "hasphoto").mkdir()
+    (SCRATCH / "hasphoto" / "Thumbs.db").write_bytes(b"\x00" * 400)
+    make_img(SCRATCH / "hasphoto" / "real.jpg", model="SM-S918B",
+             date="2023:05:10 14:30:00")
+
+    found = {f.name: sorted(e.name for e in entries)
+             for f, entries in core.find_leftover_only_folders(SCRATCH)}
+    check(set(found) == {"camera", "mac"},
+          f"only the folders holding nothing else (got {sorted(found)})")
+    check(found["mac"] == ['.DS_Store', '._IMG_1.jpg'],
+          f"both kinds of macOS leftover recognised (got {found['mac']})")
+    check("hasphoto" not in found,
+          "a folder with a real photo in it is never offered")
+
+
+def test_sidecars_holding_real_data_are_never_offered_for_deletion():
+    """The line that matters. Thumbs.db is a cache the system regenerates;
+    an .aae is Apple's edit data for a photo and nothing brings it back. The
+    application must not offer to delete the second kind."""
+    for name in ("IMG_1234.aae", "photo.xmp", "meta.json"):
+        d = SCRATCH / name.split('.')[-1]
+        d.mkdir(exist_ok=True)
+        (d / name).write_bytes(b"real data")
+
+    found = [f.name for f, _ in core.find_leftover_only_folders(SCRATCH)]
+    check(found == [],
+          f"no folder holding a sidecar is offered for deletion (got {found})")
+
+    for name in ("IMG_1234.aae", "photo.xmp", "meta.json", "holiday.jpg"):
+        check(core._is_regenerable_leftover(Path(name)) is False,
+              f"{name} is not treated as regenerable")
+    for name in ("Thumbs.db", "thumbs.db", "desktop.ini", ".DS_Store"):
+        check(core._is_regenerable_leftover(Path(name)) is True,
+              f"{name} is treated as regenerable")
+
+
+def test_removing_leftovers_deletes_only_what_was_offered():
+    (SCRATCH / "camera").mkdir()
+    (SCRATCH / "camera" / "Thumbs.db").write_bytes(b"\x00" * 400)
+    (SCRATCH / "keep").mkdir()
+    (SCRATCH / "keep" / "notes.aae").write_bytes(b"edit data")
+
+    folders = core.find_leftover_only_folders(SCRATCH)
+    deleted, removed = core.remove_leftovers(folders, core.Progress())
+    check((deleted, removed) == (1, 1),
+          f"one file and one folder went (got {deleted}, {removed})")
+    check(not (SCRATCH / "camera").exists(), "the folder was removed")
+    check((SCRATCH / "keep" / "notes.aae").exists(),
+          "the folder holding an .aae was never touched")
+
+
 def test_preview_and_a_fresh_execute_agree_on_every_file():
     """The defect this exists to prevent: preview and execute used to be two
     separate implementations, and had already grown different collision
