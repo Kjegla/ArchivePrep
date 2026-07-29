@@ -11,8 +11,9 @@ permissions:
 
 jobs:
   # The core imports no tkinter, so almost the whole suite runs anywhere.
-  # Only the handful of window-wiring tests need a display, and those run on
-  # the Windows job below.
+  # Only the handful of window-wiring tests need a display. This job gates
+  # both builds, and each build then runs the suite again on its own platform
+  # - the binary that ships should be tested on the system it runs on.
   test:
     runs-on: ubuntu-latest
     steps:
@@ -55,7 +56,14 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install dependencies
-        run: pip install -r requirements.txt pyinstaller
+        run: pip install -r requirements-dev.txt pyinstaller
+      # macOS is the one platform whose binary was never tested before
+      # shipping, and it is the one with behaviour Linux does not exercise:
+      # a case-insensitive filesystem, and the ._ metadata companions macOS
+      # leaves on memory cards and network shares. The window tests skip
+      # themselves if Tk cannot start here.
+      - name: Run the full suite
+        run: python -m pytest tests/ -q
       - name: Build app
         run: python -m PyInstaller --windowed --noconfirm --collect-all sv_ttk --name ArchivePrep archiveprep.py
       - name: Zip the app bundle

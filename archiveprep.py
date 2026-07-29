@@ -34,12 +34,6 @@ class ArchivePrepGUI:
         self.root.title("ArchivePrep")
         self.root.geometry("960x780")
 
-        # Set icon (VLC cone if available)
-        try:
-            self.root.iconbitmap(default='vlc_cone.ico')
-        except Exception:
-            pass
-
         # Variables
         self.source_folder = tk.StringVar()
         self.operation_mode = tk.StringVar(value="move")

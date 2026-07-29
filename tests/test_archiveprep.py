@@ -398,6 +398,58 @@ def test_large_identical_files_full_hash_stage():
 # Damage, misnaming and the set-aside folders
 # ---------------------------------------------------------------------------
 
+def test_macos_metadata_companions_are_not_photos():
+    """macOS writes a "._Photo.jpg" beside a file whenever it copies to a
+    volume that cannot hold its metadata natively - FAT32 and exFAT cards, USB
+    sticks, network shares. The suffix says .jpg, so they used to be collected
+    as images, handed to Pillow, and reported as damaged.
+
+    That is a false positive in the one check that exists because of a real
+    corrupted export, on any collection that has ever been near an SD card.
+    """
+    make_img(SCRATCH / "IMG_0001.jpg", model="SM-S918B", date="2023:05:10 14:30:00")
+    # what macOS actually leaves behind: the AppleDouble magic, then a stub
+    (SCRATCH / "._IMG_0001.jpg").write_bytes(
+        core.APPLEDOUBLE_MAGIC + b'\x00\x02\x00\x00' + bytes(4000))
+    (SCRATCH / "._IMG_0001.MOV").write_bytes(
+        core.APPLEDOUBLE_MAGIC + b'\x00\x02\x00\x00' + bytes(600))
+
+    reg, raw = core.collect_media_files(SCRATCH, False)
+    found = sorted(p.name for p in reg + raw)
+    check(found == ["IMG_0001.jpg"],
+          f"the companions are not collected as media (got {found})")
+
+    stats = run_app(dry_run=False, operation="move", check_corrupt=True,
+                    dedupe=True)
+    check(stats['damaged'] == 0,
+          f"and nothing is reported as damaged (got {stats['damaged']})")
+    files = relpaths()
+    check(not any(f.startswith("Corrupt/") for f in files),
+          f"nothing went to Corrupt (got {files})")
+    check((SCRATCH / "._IMG_0001.jpg").exists(),
+          "the companion was left exactly where macOS put it")
+    check("Samsung Galaxy S23 Ultra/2023/05-May/IMG_0001.jpg" in files,
+          f"and the real photo was organized as normal (got {files})")
+
+
+def test_a_real_photo_is_not_skipped_just_for_being_named_like_one():
+    """The rule above is about contents, not names. A photo really could be
+    called "._holiday.jpg", and skipping it on the strength of its name would
+    be exactly the kind of guess this application does not make."""
+    make_img(SCRATCH / "._holiday.jpg", model="SM-S918B",
+             date="2023:05:10 14:30:00", color='green')
+
+    check(core.is_appledouble(SCRATCH / "._holiday.jpg") is False,
+          "a real JPEG is not mistaken for a metadata companion")
+    reg, raw = core.collect_media_files(SCRATCH, False)
+    check([p.name for p in reg + raw] == ["._holiday.jpg"],
+          f"...and it is still collected (got {[p.name for p in reg + raw]})")
+
+    run_app(dry_run=False, operation="move")
+    check("Samsung Galaxy S23 Ultra/2023/05-May/._holiday.jpg" in relpaths(),
+          f"...and organized normally (got {relpaths()})")
+
+
 def test_damaged_files_routed_to_corrupt():
     (SCRATCH / "a").mkdir()
     (SCRATCH / "b").mkdir()

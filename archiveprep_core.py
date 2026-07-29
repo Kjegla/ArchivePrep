@@ -950,6 +950,34 @@ def looks_like_media_by_content(file_path):
     return probe_file(file_path)[0] is not None
 
 
+# macOS writes a companion "._Photo.jpg" beside a file whenever it copies to a
+# volume that cannot hold its metadata natively - FAT32 and exFAT memory cards,
+# USB sticks, many network shares. They are small metadata stubs.
+APPLEDOUBLE_MAGIC = b'\x00\x05\x16\x07'
+
+
+def is_appledouble(file_path):
+    """True if this is one of macOS's own metadata companion files.
+
+    Judged by content, not by name. A photo really could be called
+    "._holiday.jpg", and calling it damaged because of its name would be the
+    kind of guess this application does not make - so the name only decides
+    which files are worth reading four bytes of.
+
+    Without this they are collected as images (the suffix says .jpg), handed
+    to Pillow, and reported as damaged - a false positive in the one check
+    that exists because of a genuinely corrupted export, on any collection
+    that has ever passed through an SD card.
+    """
+    if not file_path.name.startswith('._'):
+        return False
+    try:
+        with open(file_path, 'rb') as f:
+            return f.read(4) == APPLEDOUBLE_MAGIC
+    except OSError:
+        return False
+
+
 def collect_media_files(source_path, include_subfolders):
     """List media files in the source. Shared by the organizer and the
     preview-cache validation so both always see the same file set.
@@ -978,7 +1006,8 @@ def collect_media_files(source_path, include_subfolders):
     # organized before the rename still holds archiveprep's older
     # 'kjegla_' logs and reports.
     all_files = [f for f in all_files
-                 if not f.name.startswith(('kjegla_', 'archiveprep_'))]
+                 if not f.name.startswith(('kjegla_', 'archiveprep_'))
+                 and not is_appledouble(f)]
 
     raw_files = [f for f in all_files if f.suffix.lower() in RAW_EXTS]
     regular = [f for f in all_files
