@@ -1,20 +1,58 @@
-# V4 status
+# ArchivePrep - V4 status
 
 **This branch is unfinished.** The released version is still
-[v34](../../releases). Nothing here has been built into a download and no tag
-has been created, so the Releases page is untouched.
+[v34](../../releases), under the project's former name. Nothing here has been
+built into a download and no tag has been created, so the Releases page is
+untouched.
 
 `v35-wip` remains as the historical snapshot of the last script-based
 generation. V4 is a new architectural generation, not an extension of it.
 
-## What V4 is for
+## Before running V4 on a folder organized by an older build
 
-**Prepare messy media collections for long-term archival.** It analyses,
-transforms, and gets out of the way. It is not, and will not become, a digital
-asset manager - no database, no catalog, no thumbnail browser, no editor, no
-cloud. The absence of a library is the product.
+**The files the application writes are now named `archiveprep_*` instead of
+`kjegla_*`, and undo records are found by that name.** An undo record left by
+v35 or earlier will not be offered by the V4 window.
+
+If any folder still has a run you might want to reverse:
+
+- **Use "Undo Last Run" with the old build first**, or
+- rename its `kjegla_undo_*` files to `archiveprep_undo_*` by hand.
+
+Nothing is lost either way - the files and the record are both still there -
+but V4 will not find the record for you. Folders with no pending undo need
+nothing.
+
+## What ArchivePrep is for
+
+**Turn an unknown, messy media collection into a clean, understood archive you
+can merge into long-term storage with confidence.** It analyses, transforms,
+and gets out of the way. It is not, and will not become, a digital asset
+manager - no database, no catalog, no thumbnail browser, no editor, no cloud.
+The absence of a library is the product.
 
 It runs *before* Immich, digiKam or a NAS, not instead of them.
+
+## Why the features exist
+
+Every capability traces to a real archival problem:
+
+1. **Organizing mixed media** from many devices and sources
+2. **Detecting true duplicates** before merging into the archive
+3. **Verifying integrity** - after finding that one of three iCloud exports
+   contained corrupted files
+4. **Handling real-world export formats**, Google Takeout above all
+
+Extension-mismatch detection is *not* one of them. It exists only because the
+application already reads file headers, and is kept as an optional maintenance
+feature. It does not drive architecture or roadmap decisions.
+
+## Honest answers over confident guesses
+
+`Unknown Camera` is not a failure. If a file's camera cannot be established
+from its own metadata or from the photos it was captured with, Unknown is the
+correct answer and it stays. The measure of the result is whether the archive
+is understandable and trustworthy - not how few files are Unknown.
 
 ## Where it stands
 
@@ -27,7 +65,7 @@ Four tiers are done. Every one ended with the full suite green.
 | **3 Structure** | Core split from the window; one record per file; deciding split from doing; per-run manifest; CI runs the tests |
 | **4 Understanding** | One place that identifies a file; Takeout sidecar dates; captures; embedded motion clips |
 
-**93 tests, 333 checks.** 89 of them need no screen at all.
+**95 tests, 345 checks.** 91 of them need no screen at all.
 
 ```bash
 pip3 install -r requirements-dev.txt
@@ -70,7 +108,7 @@ second is the user's to answer.
   behaviour was asserted as correct by the test suite until V4.
 - **Photos whose EXIF Google stripped are filed by when they were taken**,
   read from the Takeout sidecar, instead of by when you downloaded the export.
-- **Every run writes `kjegla_manifest_*.csv`** - one row per file: what it was,
+- **Every run writes `archiveprep_manifest_*.csv`** - one row per file: what it was,
   what was decided, where it went, its camera, its date and *where that date
   came from*, its integrity verdict, and its content hash where the duplicate
   hunt already computed one. This is what to read when merging a batch into an
@@ -89,7 +127,8 @@ tidiness is worth, and it was postponed on those grounds rather than missed.
 ## Not yet done
 
 - Sidecar dates cover Google Takeout JSON. `.xmp` and `.aae` are not read.
-- Sidecar files are not carried along into the organised output.
-- The output layout is still camera-model first, with no choice of template.
+- Takeout JSON is read for a missing capture date and then left alone -
+  it is not copied into the organised archive. The goal is the media's own
+  metadata, not Google Photos concepts.
 - Manifest hashing is opportunistic by design: a file with a unique size is
   never read, so it has no hash. dupeGuru still owns cross-archive comparison.

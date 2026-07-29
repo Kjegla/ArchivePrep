@@ -20,7 +20,7 @@ import struct
 import pytest
 
 from conftest import SCRATCH, check, make_img, make_mp4_with_date, truncate
-import organizer_core as core
+import archiveprep_core as core
 
 
 # --------------------------------------------------------------------------

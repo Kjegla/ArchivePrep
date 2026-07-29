@@ -1,6 +1,6 @@
 """The window's side of the seam.
 
-Everything else in this suite drives organizer_core directly, which is what
+Everything else in this suite drives archiveprep_core directly, which is what
 makes it fast and screen-free. That leaves exactly one thing unproven: that
 the window really does build the settings object the core expects and hand it
 over, and really does get the results back.
@@ -15,8 +15,8 @@ import time
 import pytest
 
 from conftest import SCRATCH, build_source, check, make_settings, relpaths
-import organizer_core as core
-import photo_organizer as po
+import archiveprep_core as core
+import archiveprep as ap
 
 pytestmark = pytest.mark.gui
 
@@ -29,9 +29,20 @@ def tk_root():
     fails with "invalid command name tcl_findLibrary" when a second root goes
     up in the same process. Each test gets its own Toplevel on this one
     instead, which is what the window would be in a real session anyway.
+
+    If Tcl cannot start at all, skip rather than fail. These tests are already
+    marked `gui` precisely because a display is not always available, and a
+    machine where Tk will not initialise is exactly that case.
+
+    The skip is deliberately scoped to *root creation only*. Building the
+    window itself happens in the tests, so a genuine bug in ArchivePrepGUI
+    still fails loudly - this hides an unusable Tcl, not a broken application.
     """
     import tkinter as tk
-    root = tk.Tk()
+    try:
+        root = tk.Tk()
+    except tk.TclError as e:
+        pytest.skip(f"no usable Tk on this machine: {e}")
     root.withdraw()
     yield root
     root.destroy()
@@ -42,7 +53,7 @@ def make_app(tk_root, **settings):
     import tkinter as tk
     root = tk.Toplevel(tk_root)
     root.withdraw()
-    app = po.PhotoOrganizerGUI(root)
+    app = ap.ArchivePrepGUI(root)
     s = make_settings(**settings)
     app.source_folder.set(s.source)
     app.operation_mode.set(s.operation)
@@ -101,7 +112,7 @@ def test_window_organizes_end_to_end_through_its_own_path(tk_root):
         check(app.stats['processed'] > 0,
               f"statistics came back to the window (got {app.stats['processed']})")
         check(app.stats['errors'] == 0, f"no errors (got {app.stats['errors']})")
-        check(len(list(SCRATCH.glob("kjegla_undo_*.jsonl"))) == 1,
+        check(len(list(SCRATCH.glob("archiveprep_undo_*.jsonl"))) == 1,
               "an undo record was written")
     finally:
         root.destroy()

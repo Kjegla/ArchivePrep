@@ -26,12 +26,12 @@ import pytest
 
 # Import the app from the repo root, wherever this checkout happens to live
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import organizer_core as core  # noqa: E402
+import archiveprep_core as core  # noqa: E402
 
 from PIL import Image as PILImage  # noqa: E402
 
 # Kept outside the repo so a failed run never leaves test files behind in it
-SCRATCH = Path(tempfile.gettempdir()) / "photo_organizer_tests"
+SCRATCH = Path(tempfile.gettempdir()) / "archiveprep_tests"
 
 # How many media files build_source() lays down
 TOTAL = 15
@@ -163,7 +163,7 @@ def make_settings(operation="copy", subfolder="year-month", separate_raw=True,
                   separate_screenshots=True, multithread=True,
                   include_subfolders=False, dedupe=False, check_corrupt=False,
                   thorough=False, cleanup_empty=True, fix_ext=True):
-    """Exactly what PhotoOrganizerGUI._snapshot_settings() hands the core."""
+    """Exactly what ArchivePrepGUI._snapshot_settings() hands the core."""
     return SimpleNamespace(
         source=str(SCRATCH),
         operation=operation,
@@ -202,4 +202,4 @@ def relpaths():
     """Every file under the scratch folder, source-relative, slash-separated."""
     return sorted(str(p.relative_to(SCRATCH)).replace("\\", "/")
                   for p in SCRATCH.rglob("*") if p.is_file()
-                  and not p.name.startswith("kjegla_"))
+                  and not p.name.startswith("archiveprep_"))

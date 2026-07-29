@@ -1,4 +1,4 @@
-"""End-to-end tests for organizer_core.py - the whole application except the
+"""End-to-end tests for archiveprep_core.py - the whole application except the
 window.
 
     python -m pytest tests/ -q
@@ -31,7 +31,7 @@ import struct
 from datetime import datetime
 from pathlib import Path
 
-import organizer_core as core
+import archiveprep_core as core
 from conftest import (SCRATCH, TOTAL, build_source, check, make_big_img,
                       make_img, make_mp4_with_date, make_settings, relpaths,
                       run_app, run_undo, truncate)
@@ -93,7 +93,7 @@ def test_dry_run_then_copy_then_rerun():
     for e in expected:
         check(e in files, f"created {e}")
     check((SCRATCH / "cam1.jpg").exists(), "copy keeps originals")
-    undo_files = list(SCRATCH.glob("kjegla_undo_*.jsonl"))
+    undo_files = list(SCRATCH.glob("archiveprep_undo_*.jsonl"))
     check(len(undo_files) == 1, f"undo record written (got {len(undo_files)})")
 
     # 3. Re-running finds everything already there; only a changed file moves
@@ -122,7 +122,7 @@ def test_move_then_undo():
           f"move processed {TOTAL} (got {stats['processed']})")
     check(stats['errors'] == 0, f"move errors 0 (got {stats['errors']})")
 
-    undo_files = sorted(SCRATCH.glob("kjegla_undo_*.jsonl"))
+    undo_files = sorted(SCRATCH.glob("archiveprep_undo_*.jsonl"))
     check(len(undo_files) == 1, "one undo record present")
     record = core.read_undo(undo_files[0])
     check(record['operation'] == 'move', "undo record has operation=move")
@@ -136,8 +136,8 @@ def test_move_then_undo():
     check(not (SCRATCH / "Samsung Galaxy S23 Ultra").exists(),
           "camera folder cleaned up")
     check(not (SCRATCH / "Unknown Camera").exists(), "Unknown Camera folder cleaned up")
-    check(list(SCRATCH.glob("kjegla_undo_*.jsonl")) == [], "undo record consumed")
-    check(len(list(SCRATCH.glob("kjegla_undo_*.undone"))) == 1,
+    check(list(SCRATCH.glob("archiveprep_undo_*.jsonl")) == [], "undo record consumed")
+    check(len(list(SCRATCH.glob("archiveprep_undo_*.undone"))) == 1,
           "undo record renamed .undone")
 
 
@@ -297,7 +297,7 @@ def test_cached_preview_replay():
     top_media = [p for p in SCRATCH.iterdir()
                  if p.is_file() and p.suffix.lower() in core.ALL_MEDIA_EXTS]
     check(top_media == [], "replay: source top level emptied (move)")
-    check(len(list(SCRATCH.glob("kjegla_undo_*.jsonl"))) == 1,
+    check(len(list(SCRATCH.glob("archiveprep_undo_*.jsonl"))) == 1,
           "replay wrote an undo record")
 
 
@@ -356,7 +356,7 @@ def test_duplicates_by_content():
     check("Duplicates/IMG_1234 (1).jpg" in files, "'(1)' copy set aside")
     check("Duplicates/IMG_1234 - Copy.jpg" in files, "'- Copy' copy set aside")
     check(stats['duplicate_bytes'] > 0, "wasted space is measured")
-    check(len(list(SCRATCH.glob("kjegla_duplicates_*.txt"))) == 1,
+    check(len(list(SCRATCH.glob("archiveprep_duplicates_*.txt"))) == 1,
           "a duplicate report was written")
 
 
@@ -446,7 +446,7 @@ def test_misnamed_files_and_undo_renames():
 
     # 2. The renames get their own undo record, inside the folder they affect
     rename_records = list((SCRATCH / "Wrong Extension")
-                          .glob("kjegla_undo_renames_*.jsonl"))
+                          .glob("archiveprep_undo_renames_*.jsonl"))
     check(len(rename_records) == 1,
           f"a separate rename undo record was written inside Wrong Extension/ "
           f"(got {len(rename_records)})")
@@ -537,7 +537,7 @@ def test_undo_restores_out_of_set_aside_folders():
     check("Duplicates/src/IMG_1 (1).jpg" in files,
           f"duplicate mirrored its source folder (got {files})")
     check("Corrupt/src/broken.jpg" in files, "damaged file mirrored its source folder")
-    undo_files = sorted(SCRATCH.glob("kjegla_undo_*.jsonl"))
+    undo_files = sorted(SCRATCH.glob("archiveprep_undo_*.jsonl"))
     check(len(undo_files) == 1, "undo record written")
     record = core.read_undo(undo_files[0])
     check(len(record['entries']) == 3,
@@ -593,7 +593,7 @@ def test_standalone_check_files_is_read_only():
     check(stats['unchecked'] == 1,
           f"1 unchecked RAW reported (got {stats['unchecked']})")
     check(stats['total_files'] == 3, f"3 files scanned (got {stats['total_files']})")
-    reports = list(SCRATCH.glob("kjegla_health_*.txt"))
+    reports = list(SCRATCH.glob("archiveprep_health_*.txt"))
     check(len(reports) == 1, "a health report was written")
     report_text = reports[0].read_text(encoding='utf-8')
     check("bad.jpg" in report_text, "the damaged file is named in the report")
@@ -657,7 +657,7 @@ def test_check_files_separates_names_that_break_from_names_that_do_not():
         make_settings(operation="move", check_corrupt=True), core.Progress())
     check(stats['misnamed'] == 3, f"3 misnamed in total (got {stats['misnamed']})")
 
-    report = list(SCRATCH.glob("kjegla_health_*.txt"))[0].read_text(encoding='utf-8')
+    report = list(SCRATCH.glob("archiveprep_health_*.txt"))[0].read_text(encoding='utf-8')
     check("2 will not open" in report,
           f"the summary counts the ones that matter (got: "
           f"{[l for l in report.splitlines() if 'Wrong file' in l]})")
@@ -702,7 +702,7 @@ def test_thorough_mode_end_to_end():
 def test_undo_journal_is_append_only_and_survives_a_torn_tail():
     build_source()
     run_app(dry_run=False, operation="move")
-    journals = sorted(SCRATCH.glob("kjegla_undo_*.jsonl"))
+    journals = sorted(SCRATCH.glob("archiveprep_undo_*.jsonl"))
     check(len(journals) == 1, f"a journal was written (got {len(journals)})")
     lines = journals[0].read_text(encoding='utf-8').splitlines()
     check(json.loads(lines[0]).get('operation') == 'move',
@@ -765,7 +765,7 @@ def test_a_move_is_journalled_before_it_is_made():
     check((SCRATCH / "doomed.jpg").exists(),
           "the file that failed to move is still exactly where it was")
 
-    journal = sorted(SCRATCH.glob("kjegla_undo_*.jsonl"))[-1]
+    journal = sorted(SCRATCH.glob("archiveprep_undo_*.jsonl"))[-1]
     record = core.read_undo(journal)
     origins = [Path(origin).name for _target, origin in record['entries']]
     check("doomed.jpg" in origins,
@@ -782,7 +782,7 @@ def test_a_move_is_journalled_before_it_is_made():
 def test_undo_record_from_an_older_build_still_works():
     (SCRATCH / "Old Camera").mkdir()
     (SCRATCH / "Old Camera" / "moved.jpg").write_bytes(b"the photo")
-    legacy = SCRATCH / "kjegla_undo_20240101_000000.json"
+    legacy = SCRATCH / "archiveprep_undo_20240101_000000.json"
     legacy.write_text(json.dumps({
         'operation': 'move',
         'created': '2024-01-01T00:00:00',
@@ -803,7 +803,7 @@ def test_copy_mode_undo_never_deletes_an_edited_copy():
     make_img(SCRATCH / "edited.jpg", model="SM-S918B", date="2023:05:11 09:00:00",
              color='green')
     run_app(dry_run=False, operation="copy")
-    journals = sorted(SCRATCH.glob("kjegla_undo_*.jsonl"))
+    journals = sorted(SCRATCH.glob("archiveprep_undo_*.jsonl"))
     check(len(journals) == 1, "the copy run wrote an undo record")
     record = core.read_undo(journals[0])
     check(record['operation'] == 'copy', "the record knows it was a copy run")
@@ -947,7 +947,7 @@ def test_a_clip_already_inside_its_photo_is_redundant():
               for f in files),
           "a genuine video was left completely alone")
 
-    reports = list(SCRATCH.glob("kjegla_duplicates_*.txt"))
+    reports = list(SCRATCH.glob("archiveprep_duplicates_*.txt"))
     check(len(reports) == 1, "the duplicate report covers it")
 
 
@@ -994,7 +994,7 @@ def test_preview_and_a_fresh_execute_agree_on_every_file():
     check(previewed, "the preview planned something")
 
     core.organize_photos(settings, core.Progress(), dry_run=False)
-    journal = sorted(SCRATCH.glob("kjegla_undo_*.jsonl"))[-1]
+    journal = sorted(SCRATCH.glob("archiveprep_undo_*.jsonl"))[-1]
     executed = sorted((origin, target)
                       for target, origin in core.read_undo(journal)['entries'])
     check(previewed == executed,
@@ -1019,7 +1019,7 @@ def test_preview_and_a_cached_replay_agree_on_every_file():
 
     stats = core.execute_cached_plan(plan, settings, core.Progress())
     check(stats is not None, "the replay ran")
-    journal = sorted(SCRATCH.glob("kjegla_undo_*.jsonl"))[-1]
+    journal = sorted(SCRATCH.glob("archiveprep_undo_*.jsonl"))[-1]
     executed = sorted((origin, target)
                       for target, origin in core.read_undo(journal)['entries'])
     check(previewed == executed,
@@ -1033,7 +1033,7 @@ def test_manifest_records_every_file_and_what_became_of_it():
     import csv
     build_source()
     run_app(dry_run=False, operation="move", dedupe=True)
-    manifests = list(SCRATCH.glob("kjegla_manifest_*.csv"))
+    manifests = list(SCRATCH.glob("archiveprep_manifest_*.csv"))
     check(len(manifests) == 1, f"a manifest was written (got {len(manifests)})")
 
     rows = list(csv.DictReader(manifests[0].read_text(encoding='utf-8').splitlines()))
@@ -1085,7 +1085,7 @@ def test_manifest_carries_the_hashes_the_duplicate_hunt_already_paid_for():
              color='green')
     run_app(dry_run=False, operation="move", dedupe=True)
 
-    manifest = list(SCRATCH.glob("kjegla_manifest_*.csv"))[0]
+    manifest = list(SCRATCH.glob("archiveprep_manifest_*.csv"))[0]
     rows = {Path(r['original_path']).name: r
             for r in csv.DictReader(manifest.read_text(encoding='utf-8').splitlines())}
     check(rows['IMG_1234.jpg']['content_hash'],

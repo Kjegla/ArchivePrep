@@ -974,7 +974,11 @@ def collect_media_files(source_path, include_subfolders):
     else:
         all_files = [f for f in source_path.iterdir() if f.is_file()]
     # Never touch our own log/undo files
-    all_files = [f for f in all_files if not f.name.startswith('kjegla_')]
+    # Never treat our own output as media. Both prefixes: a folder
+    # organized before the rename still holds archiveprep's older
+    # 'kjegla_' logs and reports.
+    all_files = [f for f in all_files
+                 if not f.name.startswith(('kjegla_', 'archiveprep_'))]
 
     raw_files = [f for f in all_files if f.suffix.lower() in RAW_EXTS]
     regular = [f for f in all_files
@@ -1461,7 +1465,7 @@ def _share_capture_dates(captures, progress):
                 mf.date_source = 'capture'
                 shared += 1
     if shared:
-        progress.log(f"  🔗 {shared} file(s) took their date from the photo "
+        progress.log(f"  {shared} file(s) took their date from the photo "
                      f"they were captured with")
     return shared
 
@@ -1525,7 +1529,7 @@ def _find_embedded_clips(captures, progress):
                 groups.append((host, [clip]))
                 break
     if groups:
-        progress.log(f"  🎞️ {len(groups)} clip(s) are already stored inside the "
+        progress.log(f"  {len(groups)} clip(s) are already stored inside the "
                      f"photo they belong to - the separate copy is redundant")
     return groups
 
@@ -1556,7 +1560,7 @@ def _find_duplicates(records, settings, progress, p0=40, p1=60):
         progress.percent(p1)
         return []
 
-    progress.log(f"\n♻️ Comparing {len(candidates)} files that share a size "
+    progress.log(f"\nComparing {len(candidates)} files that share a size "
                  f"with at least one other ({len(records) - len(candidates)} "
                  f"ruled out without reading them)")
 
@@ -1631,7 +1635,7 @@ def _write_duplicate_report(report_path, groups, source_path):
     """Write a plain listing of every duplicate group and its keeper."""
     try:
         with open(report_path, 'w', encoding='utf-8') as f:
-            f.write(f"Kjegla's Photo Organizer - duplicate report "
+            f.write(f"ArchivePrep - duplicate report "
                     f"{datetime.now()}\n")
             f.write(f"Source: {source_path}\n")
             f.write("Files are duplicates only when their contents match "
@@ -1717,13 +1721,13 @@ def _write_run_summary(progress, log_file, stats, duration):
     if stats['content_duplicates']:
         wasted = stats['duplicate_bytes'] / (1024 * 1024)
         progress.log(f"Duplicate copies set aside: {stats['content_duplicates']} "
-                     f"({wasted:.2f} MB) → '{DUPLICATES_FOLDER}' folder")
+                     f"({wasted:.2f} MB) -> '{DUPLICATES_FOLDER}' folder")
     if stats['damaged']:
         progress.log(f"Damaged files found: {stats['damaged']} "
-                     f"→ '{CORRUPT_FOLDER}' folder")
+                     f"-> '{CORRUPT_FOLDER}' folder")
     if stats['misnamed']:
         progress.log(f"Wrongly-named files fixed: {stats['misnamed']} "
-                     f"→ renamed to the right extension and moved to "
+                     f"-> renamed to the right extension and moved to "
                      f"'{WRONG_EXT_FOLDER}' (their contents were fine)")
     if stats['unchecked']:
         progress.log(f"Files that could not be checked: {stats['unchecked']} "
@@ -1761,10 +1765,10 @@ def _write_run_summary(progress, log_file, stats, duration):
             log_file.write(f"  {model}: {count} files\n")
 
     if stats['no_metadata'] > 0:
-        progress.log(f"\n📂 Unknown/unmatched files: {stats['no_metadata']} "
+        progress.log(f"\nUnknown/unmatched files: {stats['no_metadata']} "
                      f"(moved to 'Unknown Camera' folder)")
     if stats['screenshots'] > 0:
-        progress.log(f"\n📱 Screenshots separated: {stats['screenshots']} files")
+        progress.log(f"\nScreenshots separated: {stats['screenshots']} files")
 
 
 def organize_photos(settings, progress, dry_run=True):
@@ -1787,7 +1791,7 @@ def organize_photos(settings, progress, dry_run=True):
     operation_text = "Moving" if operation == "move" else "Copying"
 
     progress.log("=" * 60)
-    progress.log(f"Kjegla's Photo Organizer - "
+    progress.log(f"ArchivePrep - "
                  f"{'DRY RUN' if dry_run else operation_text.upper()}")
     progress.log(f"Source: {source_path}")
     progress.log(f"Operation: {operation}")
@@ -1810,7 +1814,7 @@ def organize_photos(settings, progress, dry_run=True):
         regular_media_files, raw_files = collect_media_files(
             source_path, settings.include_subfolders)
     except OSError as e:
-        progress.log(f"❌ Could not read source folder: {e}")
+        progress.log(f"[error] could not read source folder: {e}")
         progress.status("Error reading source folder")
         return stats, cached_plan
 
@@ -1826,23 +1830,23 @@ def organize_photos(settings, progress, dry_run=True):
         progress.status("No media files found")
         return stats, cached_plan
 
-    progress.log("\n📋 Reading media metadata...")
+    progress.log("\nReading media metadata...")
     records = _scan_files(media_files, settings, progress)
     if progress.cancelled:
-        progress.log("\n⏹️ Operation cancelled by user")
+        progress.log("\nOperation cancelled by user")
         progress.status("Cancelled")
         return stats, cached_plan
 
     if settings.check_corrupt or settings.fix_extensions:
         if settings.check_corrupt:
-            progress.log("\n🩺 Checking files for damage"
+            progress.log("\nChecking files for damage"
                          f"{' (thorough)' if settings.corrupt_thorough else ''}...")
         else:
-            progress.log("\n🏷️ Checking whether file extensions match their "
+            progress.log("\nChecking whether file extensions match their "
                          "contents...")
         _check_health(records, settings, progress)
         if progress.cancelled:
-            progress.log("\n⏹️ Operation cancelled by user")
+            progress.log("\nOperation cancelled by user")
             progress.status("Cancelled")
             return stats, cached_plan
         verdicts = [mf.verdict for mf in records.values()]
@@ -1864,11 +1868,11 @@ def organize_photos(settings, progress, dry_run=True):
 
     duplicate_groups = []
     if settings.dedupe_content:
-        progress.log("\n♻️ Looking for duplicate files by content...")
+        progress.log("\nLooking for duplicate files by content...")
         duplicate_groups = _find_duplicates(records, settings, progress)
         duplicate_groups += _find_embedded_clips(captures, progress)
         if progress.cancelled:
-            progress.log("\n⏹️ Operation cancelled by user")
+            progress.log("\nOperation cancelled by user")
             progress.status("Cancelled")
             return stats, cached_plan
         dups = [mf for mf in records.values() if mf.duplicate_of is not None]
@@ -1890,20 +1894,20 @@ def organize_photos(settings, progress, dry_run=True):
                  f"video files")
 
     run_stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    log_filename = f"kjegla_media_log_{run_stamp}.txt"
+    log_filename = f"archiveprep_log_{run_stamp}.txt"
     log_path = source_path / log_filename
-    undo_path = source_path / f"kjegla_undo_{run_stamp}.jsonl"
+    undo_path = source_path / f"archiveprep_undo_{run_stamp}.jsonl"
 
     ctx = SimpleNamespace(planned={}, ops=[], stats=stats, progress=progress)
 
     if duplicate_groups:
-        report_name = f"kjegla_duplicates_{run_stamp}.txt"
+        report_name = f"archiveprep_duplicates_{run_stamp}.txt"
         _write_duplicate_report(source_path / report_name, duplicate_groups,
                                 source_path)
-        progress.log(f"📄 Duplicate report saved: {report_name}")
+        progress.log(f"Duplicate report saved: {report_name}")
 
     with open(log_path, 'w', encoding='utf-8') as log_file:
-        log_file.write(f"Kjegla's Media Organization Log - {datetime.now()}\n")
+        log_file.write(f"ArchivePrep run log - {datetime.now()}\n")
         log_file.write(f"Source Folder: {source_path}\n")
         log_file.write(f"Mode: {'DRY RUN' if dry_run else operation.upper()}\n")
         log_file.write(f"Subfolder organization: {settings.subfolder_mode}\n")
@@ -1920,7 +1924,7 @@ def organize_photos(settings, progress, dry_run=True):
         total = len(ordered)
         for idx, mf in enumerate(ordered):
             if progress.cancelled:
-                progress.log("\n⏹️ Operation cancelled by user")
+                progress.log("\nOperation cancelled by user")
                 break
             if total:
                 progress.percent(60 + int((idx + 1) / total * (0 if dry_run else 20)))
@@ -1928,7 +1932,7 @@ def organize_photos(settings, progress, dry_run=True):
                 _plan_one_file(mf, source_path, settings, base_name_to_model,
                                ctx, dry_run, log_file)
             except Exception as e:
-                progress.log(f"\n❌ Error processing {mf.path.name}: {e}")
+                progress.log(f"\n[error] processing {mf.path.name}: {e}")
                 progress.log("   Skipping this file and continuing...")
                 log_file.write(f"ERROR processing {mf.path.name}: {e}\n")
                 stats['errors'] += 1
@@ -1948,32 +1952,32 @@ def organize_photos(settings, progress, dry_run=True):
 
             if rename_entries:
                 rename_undo = (source_path / WRONG_EXT_FOLDER /
-                               f"kjegla_undo_renames_{run_stamp}.jsonl")
+                               f"archiveprep_undo_renames_{run_stamp}.jsonl")
                 _journal_start(rename_undo, "move", source_path)
                 for entry in rename_entries:
                     _journal_append(rename_undo, entry)
                 progress.notify("rename_undo_available", str(rename_undo))
-                progress.log(f"\n↩️ {len(rename_entries)} rename(s) can be "
+                progress.log(f"\n{len(rename_entries)} rename(s) can be "
                              f"undone on their own with 'Undo Renames'.")
 
             if operation == "move" and settings.cleanup_empty:
                 removed = _sweep_empty_dirs(source_path, log_file)
                 stats['empty_folders_removed'] = removed
                 if removed:
-                    progress.log(f"\n🧹 Removed {removed} empty folder(s)")
+                    progress.log(f"\nRemoved {removed} empty folder(s)")
 
         duration = (datetime.now() - start_time).total_seconds()
         stats['duration_seconds'] = duration
         _write_run_summary(progress, log_file, stats, duration)
-        progress.log(f"\n📄 Log file saved: {log_filename}")
+        progress.log(f"\nLog file saved: {log_filename}")
 
     # ---- REPORT ----------------------------------------------------------
-    manifest_name = f"kjegla_manifest_{run_stamp}.csv"
+    manifest_name = f"archiveprep_manifest_{run_stamp}.csv"
     write_manifest(source_path / manifest_name, records, source_path)
-    progress.log(f"📄 Manifest saved: {manifest_name}")
+    progress.log(f"Manifest saved: {manifest_name}")
 
     if dry_run:
-        progress.log("\n⚠️  This was a DRY RUN - no files were actually "
+        progress.log("\nThis was a DRY RUN - no files were actually "
                      "moved/copied!")
         if not progress.cancelled:
             cached_plan = {
@@ -1982,14 +1986,14 @@ def organize_photos(settings, progress, dry_run=True):
                 'ops': ctx.ops,
                 'stats': copy.deepcopy(stats),
             }
-            progress.log("⚡ Preview cached - Execute will reuse it "
+            progress.log("Preview cached - Execute will reuse it "
                          "without re-scanning (as long as nothing changes).")
         progress.status("Dry run complete")
     else:
-        progress.log(f"\n✅ Operation complete! Files were {operation}d "
+        progress.log(f"\nOperation complete! Files were {operation}d "
                      f"successfully.")
         if undo_entries:
-            progress.log("↩️ This run can be undone with the 'Undo Last Run' "
+            progress.log("This run can be undone with the 'Undo Last Run' "
                          "button.")
         progress.status(f"Operation complete - {stats['processed']} files "
                         f"{operation}d")
@@ -2125,15 +2129,15 @@ def _plan_set_aside(mf, source_path, folder_name, kind, reason, ctx,
     file the extension it should have had).
     """
     rel = mf.path.relative_to(source_path)
-    icon = {DUPLICATES_FOLDER: "♻️", CORRUPT_FOLDER: "🩹",
-            WRONG_EXT_FOLDER: "🏷️"}.get(folder_name, "📦")
+    tag = {DUPLICATES_FOLDER: "[duplicate]", CORRUPT_FOLDER: "[damaged]",
+            WRONG_EXT_FOLDER: "[renamed]"}.get(folder_name, "[aside]")
 
     if settings.operation == "copy":
         # Copy mode leaves the source untouched and the good original is
         # already there, so making a third copy of a redundant or broken
         # file would only add clutter.
-        ctx.progress.log(f"\n{icon} {rel}: {reason}")
-        ctx.progress.log("  ⏭️ Left where it is (copy mode never touches the source)")
+        ctx.progress.log(f"\n{tag} {rel}: {reason}")
+        ctx.progress.log("  [skip] Left where it is (copy mode never touches the source)")
         log_file.write(f"{folder_name}: {rel} - {reason} "
                        f"(copy mode, not copied)\n")
         mf.action, mf.reason = 'skipped', reason
@@ -2145,7 +2149,7 @@ def _plan_set_aside(mf, source_path, folder_name, kind, reason, ctx,
 
     if _claimed(ctx, target):
         if _same_as_whatever_lands_at(ctx, mf.path, target):
-            ctx.progress.log(f"\n{icon} {rel}: already set aside in "
+            ctx.progress.log(f"\n{tag} {rel}: already set aside in "
                              f"{folder_name}/, leaving it alone")
             log_file.write(f"{folder_name}: {rel} already present - skipped\n")
             mf.action, mf.reason = 'skipped', "already set aside"
@@ -2157,14 +2161,14 @@ def _plan_set_aside(mf, source_path, folder_name, kind, reason, ctx,
             counter += 1
     ctx.planned[str(target).lower()] = mf.path
 
-    ctx.progress.log(f"\n{icon} {rel}: {reason}")
+    ctx.progress.log(f"\n{tag} {rel}: {reason}")
     relative_target = target.relative_to(source_path)
     mf.action, mf.target, mf.reason = kind, target, reason
     ctx.ops.append(Operation(source=mf.path, target=target, kind=kind,
                              operation="move"))
 
     if dry_run:
-        ctx.progress.log(f"  🔍 Would move to: {relative_target}")
+        ctx.progress.log(f"  [plan] would move to: {relative_target}")
         log_file.write(f"{folder_name}: would move {rel} -> "
                        f"{relative_target}\n")
 
@@ -2211,31 +2215,31 @@ def _plan_one_file(mf, source_path, settings, base_name_to_model, ctx,
     # were taken with; only images carry their own.
     match_note = None
     if mf.kind == 'raw':
-        file_type = "📸 RAW"
+        file_type = "[raw]"
         mf.camera_model = lookup_model(base_name_to_model, file_path)
         if mf.camera_model:
-            match_note = f"  🔗 Matched RAW to JPEG: {mf.camera_model}"
+            match_note = f"  matched RAW to JPEG: {mf.camera_model}"
         else:
             mf.camera_model = camera_from_filename(file_path)
-            match_note = (f"  🏷️  No matching JPEG; filename says {mf.camera_model}"
+            match_note = (f"  no matching JPEG; filename says {mf.camera_model}"
                           if mf.camera_model else
-                          "  ⚠️  No matching JPEG for RAW, will move to Unknown")
+                          "  no matching JPEG for RAW; filing as Unknown")
     elif mf.kind == 'video':
-        file_type = "🎬 Video"
+        file_type = "[video]"
         mf.camera_model = lookup_model(base_name_to_model, file_path)
         if mf.camera_model:
-            match_note = f"  🔗 Matched video to image: {mf.camera_model}"
+            match_note = f"  matched video to image: {mf.camera_model}"
         else:
             mf.camera_model = camera_from_filename(file_path)
-            match_note = (f"  🏷️  No matching image; filename says {mf.camera_model}"
+            match_note = (f"  no matching image; filename says {mf.camera_model}"
                           if mf.camera_model else
-                          "  ⚠️  No matching image for video, will move to Unknown")
+                          "  no matching image for video; filing as Unknown")
     else:
-        file_type = "📷 Image"
+        file_type = "[image]"
         if (mf.camera_model == "iPhone"
                 and file_path.suffix.lower() in HEIC_EXTS
                 and mf.date_source != 'exif'):
-            match_note = "  📱 HEIC format, assuming iPhone"
+            match_note = "  HEIC format, assuming iPhone"
 
     separate_shot = settings.separate_screenshots and mf.is_screenshot
     if separate_shot:
@@ -2252,7 +2256,7 @@ def _plan_one_file(mf, source_path, settings, base_name_to_model, ctx,
 
     # Recursive re-runs: files already in their correct spot are untouched
     if target_path == file_path:
-        ctx.progress.log(f"\n✔️ Already organized: "
+        ctx.progress.log(f"\n[skip] already organized: "
                          f"{file_path.relative_to(source_path)}")
         log_file.write(f"Already organized - skipped: {file_path.name}\n")
         ctx.stats['already_organized'] += 1
@@ -2262,8 +2266,7 @@ def _plan_one_file(mf, source_path, settings, base_name_to_model, ctx,
     file_size_mb = mf.size / (1024 * 1024)
     ctx.stats['total_size_mb'] += file_size_mb
 
-    ctx.progress.log(f"\n{file_type} Processing: {file_path.name} "
-                     f"({file_size_mb:.2f} MB)")
+    ctx.progress.log(f"\n{file_type} {file_path.name} ({file_size_mb:.2f} MB)")
     log_file.write(f"Processing: {file_path.name}\n")
     if match_note:
         ctx.progress.log(match_note)
@@ -2284,7 +2287,7 @@ def _plan_one_file(mf, source_path, settings, base_name_to_model, ctx,
     # even though nothing has been moved yet.
     if _claimed(ctx, target_path):
         if _same_as_whatever_lands_at(ctx, file_path, target_path):
-            ctx.progress.log("  ♻️ Identical file already at destination, skipping"
+            ctx.progress.log("  [skip] identical file already at destination"
                              f"{' (left in source)' if settings.operation == 'move' else ''}")
             log_file.write("  Identical duplicate - skipped\n")
             ctx.stats['duplicates'] += 1
@@ -2295,12 +2298,12 @@ def _plan_one_file(mf, source_path, settings, base_name_to_model, ctx,
             target_path = target_folder / f"{file_path.stem}_{counter}{file_path.suffix}"
             counter += 1
             if _same_as_whatever_lands_at(ctx, file_path, target_path):
-                ctx.progress.log("  ♻️ Identical file already at destination, skipping")
+                ctx.progress.log("  [skip] identical file already at destination")
                 log_file.write("  Identical duplicate - skipped\n")
                 ctx.stats['duplicates'] += 1
                 mf.action, mf.reason = 'skipped', "identical file already at destination"
                 return
-        ctx.progress.log(f"  🔄 Duplicate found, will rename to: {target_path.name}")
+        ctx.progress.log(f"  [rename] target taken, will use: {target_path.name}")
     ctx.planned[str(target_path).lower()] = file_path
 
     mf.action, mf.target = 'organize', target_path
@@ -2309,7 +2312,7 @@ def _plan_one_file(mf, source_path, settings, base_name_to_model, ctx,
 
     if dry_run:
         relative_path = target_path.relative_to(source_path)
-        ctx.progress.log(f"  🔍 Would {settings.operation} to: {relative_path}")
+        ctx.progress.log(f"  [plan] would {settings.operation} to: {relative_path}")
         log_file.write(f"  Would {settings.operation} to: {relative_path}\n")
         ctx.stats['processed'] += 1
 
@@ -2338,7 +2341,7 @@ def _apply_plan(ops, source_path, progress, stats, log_file, undo_path,
 
     for idx, op in enumerate(ops):
         if progress.cancelled:
-            progress.log("\n⏹️ Operation cancelled by user")
+            progress.log("\nOperation cancelled by user")
             break
 
         pct = p0 + int((idx + 1) / total * (p1 - p0))
@@ -2367,7 +2370,7 @@ def _apply_plan(ops, source_path, progress, stats, log_file, undo_path,
             # is the very same file, in which case there is nothing to do.
             if target.exists():
                 if files_identical(source, target):
-                    progress.log(f"  ♻️ {source.name}: identical file already "
+                    progress.log(f"  [skip] {source.name}: identical file already "
                                  f"at destination, skipping")
                     log_file.write(f"  Identical duplicate - skipped: {source}\n")
                     stats['duplicates'] += 1
@@ -2377,7 +2380,7 @@ def _apply_plan(ops, source_path, progress, stats, log_file, undo_path,
                 while target.exists():
                     target = base.parent / f"{base.stem}_{counter}{base.suffix}"
                     counter += 1
-                progress.log(f"  🔄 {base.name}: destination taken, "
+                progress.log(f"  [rename] {base.name}: destination taken, "
                              f"renaming to {target.name}")
 
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -2398,13 +2401,13 @@ def _apply_plan(ops, source_path, progress, stats, log_file, undo_path,
             # Names the file as well as the destination: deciding and doing
             # are separate passes now, so the action lines are no longer
             # sitting directly under the "Processing X" line they belong to.
-            progress.log(f"  ✅ {operation_text[op.operation]} {source.name} "
-                         f"→ {relative}")
+            progress.log(f"  [done] {operation_text[op.operation]} {source.name} "
+                         f"-> {relative}")
             log_file.write(f"  {operation_text[op.operation]} {source.name} "
                            f"-> {relative}\n")
             stats['processed'] += 1
         except Exception as e:
-            progress.log(f"  ❌ {source.name}: {e}")
+            progress.log(f"  [error] {source.name}: {e}")
             log_file.write(f"  FILE OPERATION ERROR {source}: {e}\n")
             stats['errors'] += 1
 
@@ -2432,10 +2435,10 @@ def execute_cached_plan(plan, settings, progress):
         regular, raw = collect_media_files(
             source_path, settings.include_subfolders)
     except OSError as e:
-        progress.log(f"❌ Could not read source folder: {e}")
+        progress.log(f"[error] could not read source folder: {e}")
         return None
     if folder_fingerprint(regular + raw) != plan['fingerprint']:
-        progress.log("⚠️ Folder changed since the preview - "
+        progress.log("Folder changed since the preview - "
                      "running a fresh analysis instead.")
         return None
 
@@ -2449,19 +2452,19 @@ def execute_cached_plan(plan, settings, progress):
     stats['errors'] = 0
 
     run_stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    log_filename = f"kjegla_media_log_{run_stamp}.txt"
-    undo_path = source_path / f"kjegla_undo_{run_stamp}.jsonl"
+    log_filename = f"archiveprep_log_{run_stamp}.txt"
+    undo_path = source_path / f"archiveprep_undo_{run_stamp}.jsonl"
 
     progress.log("=" * 60)
-    progress.log(f"Kjegla's Photo Organizer - {operation_text.upper()} "
+    progress.log(f"ArchivePrep - {operation_text.upper()} "
                  f"(cached preview)")
     progress.log(f"Source: {source_path}")
-    progress.log(f"⚡ Folder unchanged since preview - executing "
+    progress.log(f"Folder unchanged since preview - executing "
                  f"{len(ops)} planned operation(s) directly")
     progress.log("=" * 60)
 
     with open(source_path / log_filename, 'w', encoding='utf-8') as log_file:
-        log_file.write(f"Kjegla's Media Organization Log - {datetime.now()}\n")
+        log_file.write(f"ArchivePrep run log - {datetime.now()}\n")
         log_file.write(f"Source Folder: {source_path}\n")
         log_file.write(f"Mode: {operation.upper()} (cached preview replay)\n")
         log_file.write("=" * 60 + "\n\n")
@@ -2477,7 +2480,7 @@ def execute_cached_plan(plan, settings, progress):
 
         if rename_entries:
             rename_undo = (source_path / WRONG_EXT_FOLDER /
-                           f"kjegla_undo_renames_{run_stamp}.jsonl")
+                           f"archiveprep_undo_renames_{run_stamp}.jsonl")
             _journal_start(rename_undo, "move", source_path)
             for entry in rename_entries:
                 _journal_append(rename_undo, entry)
@@ -2487,7 +2490,7 @@ def execute_cached_plan(plan, settings, progress):
             removed = _sweep_empty_dirs(source_path, log_file)
             stats['empty_folders_removed'] = removed
             if removed:
-                progress.log(f"\n🧹 Removed {removed} empty folder(s)")
+                progress.log(f"\nRemoved {removed} empty folder(s)")
 
         duration = (datetime.now() - start_time).total_seconds()
         stats['duration_seconds'] = duration
@@ -2500,11 +2503,11 @@ def execute_cached_plan(plan, settings, progress):
                      f"(analysis skipped - cached preview)")
         log_file.write(f"\nSUMMARY: processed {stats['processed']}, "
                        f"errors {stats['errors']}, {duration:.1f}s\n")
-        progress.log(f"\n📄 Log file saved: {log_filename}")
-        progress.log(f"\n✅ Operation complete! Files were {operation}d "
+        progress.log(f"\nLog file saved: {log_filename}")
+        progress.log(f"\nOperation complete! Files were {operation}d "
                      f"successfully.")
         if undo_entries:
-            progress.log("↩️ This run can be undone with the 'Undo Last Run' "
+            progress.log("This run can be undone with the 'Undo Last Run' "
                          "button.")
         progress.status(f"Operation complete - {stats['processed']} files "
                         f"{operation}d")
@@ -2527,7 +2530,7 @@ def run_health_check(settings, progress):
     settings.check_corrupt = True
 
     progress.log("=" * 60)
-    progress.log("Kjegla's Photo Organizer - FILE HEALTH CHECK"
+    progress.log("ArchivePrep - FILE HEALTH CHECK"
              f"{' (thorough)' if settings.corrupt_thorough else ''}")
     progress.log(f"Source: {source_path}")
     progress.log("Nothing will be moved, renamed or deleted.")
@@ -2537,7 +2540,7 @@ def run_health_check(settings, progress):
         regular, raw = collect_media_files(source_path,
                                            settings.include_subfolders)
     except OSError as e:
-        progress.log(f"❌ Could not read source folder: {e}")
+        progress.log(f"[error] could not read source folder: {e}")
         progress.status("Error reading source folder")
         return stats
 
@@ -2548,13 +2551,13 @@ def run_health_check(settings, progress):
         progress.status("No media files found")
         return stats
 
-    progress.log(f"\n🩺 Checking {len(media_files)} file(s)...")
+    progress.log(f"\nChecking {len(media_files)} file(s)...")
     records = {p: MediaFile(path=p) for p in media_files}
     _check_health(records, settings, progress, p0=0, p1=100)
     health = {mf.path: (mf.verdict, mf.verdict_reason) for mf in records.values()}
 
     if progress.cancelled:
-        progress.log("\n⏹️ Check cancelled by user")
+        progress.log("\nCheck cancelled by user")
         progress.status("Cancelled")
         return stats
 
@@ -2578,10 +2581,10 @@ def run_health_check(settings, progress):
     stats['processed'] = len(health)
 
     run_stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    report_name = f"kjegla_health_{run_stamp}.txt"
+    report_name = f"archiveprep_health_{run_stamp}.txt"
     try:
         with open(source_path / report_name, 'w', encoding='utf-8') as f:
-            f.write(f"Kjegla's Photo Organizer - file health check "
+            f.write(f"ArchivePrep - file health check "
                     f"{datetime.now()}\n")
             f.write(f"Source: {source_path}\n")
             f.write(f"Mode: {'thorough' if settings.corrupt_thorough else 'quick'}\n")
@@ -2622,28 +2625,28 @@ def run_health_check(settings, progress):
                 for path in sorted(unchecked, key=lambda p: str(p).lower()):
                     f.write(f"  {path.relative_to(source_path)}\n")
     except OSError as e:
-        progress.log(f"⚠️ Could not write the report file: {e}")
+        progress.log(f"[warn] could not write the report file: {e}")
 
     progress.log("\n" + "=" * 60)
     progress.log("RESULTS:")
-    progress.log(f"✅ Fine: {healthy}")
-    progress.log(f"🩹 Damaged: {len(damaged)}")
-    progress.log(f"🏷️ Wrong file extension: {len(misnamed)} "
+    progress.log(f"Fine:                  {healthy}")
+    progress.log(f"Damaged:               {len(damaged)}")
+    progress.log(f"Wrong file extension:  {len(misnamed)} "
              f"- {len(breaking)} will not open at all, "
              f"{len(harmless)} open fine anyway")
-    progress.log(f"❓ Could not be checked: {len(unchecked)} "
+    progress.log(f"Could not be checked:  {len(unchecked)} "
              f"(RAW / some video formats - not a sign they are broken)")
 
     if damaged:
         progress.log("\nDamaged files:")
         for path in damaged[:200]:
-            progress.log(f"  🩹 {path.relative_to(source_path)} - "
+            progress.log(f"  [damaged] {path.relative_to(source_path)} - "
                      f"{health[path][1]}")
         if len(damaged) > 200:
             progress.log(f"  ... and {len(damaged) - 200} more "
                      f"(the full list is in the report file)")
     else:
-        progress.log("\n🎉 No damaged files found.")
+        progress.log("\nNo damaged files found.")
 
     for heading, paths in (
             ("\nWrong file extension, WILL NOT OPEN (not damaged - the name "
@@ -2655,21 +2658,21 @@ def run_health_check(settings, progress):
             continue
         progress.log(heading)
         for path in paths[:100]:
-            progress.log(f"  🏷️ {path.relative_to(source_path)} - "
+            progress.log(f"  [renamed] {path.relative_to(source_path)} - "
                          f"{health[path][1]}")
         if len(paths) > 100:
             progress.log(f"  ... and {len(paths) - 100} more "
                          f"(the full list is in the report file)")
 
     if damaged or misnamed:
-        progress.log("\n💡 Tick 'Check files for damage while organizing' to have "
+        progress.log("\nTip: tick 'Check files for damage while organizing' to have "
                  f"damaged files moved into a '{CORRUPT_FOLDER}' folder and "
                  f"misnamed ones into '{WRONG_EXT_FOLDER}' on the next run.")
 
     duration = (datetime.now() - start_time).total_seconds()
     stats['duration_seconds'] = duration
     progress.log(f"\nDuration: {duration:.1f} seconds")
-    progress.log(f"📄 Report saved: {report_name}")
+    progress.log(f"Report saved: {report_name}")
     progress.status(f"Check complete - {len(damaged)} damaged, "
                        f"{healthy} fine")
 
@@ -2684,21 +2687,21 @@ def run_undo(undo_file, record, progress, label=None):
     problems = 0
 
     progress.log("\n" + "=" * 60)
-    progress.log(f"↩️ UNDOING {label or ('last ' + op + ' run')} ({total} files)")
+    progress.log(f"UNDOING {label or ('last ' + op + ' run')} ({total} files)")
     progress.log("=" * 60)
 
     for idx, (target, original) in enumerate(entries):
         if progress.cancelled:
-            progress.log("\n⏹️ Undo cancelled by user")
+            progress.log("\nUndo cancelled by user")
             break
         target_p, original_p = Path(target), Path(original)
         try:
             if op == "move":
                 if not target_p.exists():
-                    progress.log(f"  ⚠️ Missing, cannot restore: {target}")
+                    progress.log(f"  [warn] missing, cannot restore: {target}")
                     problems += 1
                 elif original_p.exists():
-                    progress.log(f"  ⚠️ Original location occupied, skipping: {original}")
+                    progress.log(f"  [warn] original location occupied, skipping: {original}")
                     problems += 1
                 else:
                     original_p.parent.mkdir(parents=True, exist_ok=True)
@@ -2714,18 +2717,18 @@ def run_undo(undo_file, record, progress, label=None):
                 if not target_p.exists():
                     pass  # already gone; nothing to undo
                 elif not original_p.exists():
-                    progress.log(f"  ⚠️ The original is gone, so this copy is "
+                    progress.log(f"  [warn] the original is gone, so this copy is "
                              f"now the only one - keeping it: {target}")
                     problems += 1
                 elif not files_identical(target_p, original_p):
-                    progress.log(f"  ⚠️ Changed since it was copied - keeping "
+                    progress.log(f"  [warn] changed since it was copied - keeping "
                              f"it: {target}")
                     problems += 1
                 else:
                     os.remove(str(target_p))
                     restored += 1
         except Exception as e:
-            progress.log(f"  ❌ {target}: {e}")
+            progress.log(f"  [error] {target}: {e}")
             problems += 1
 
         if (idx + 1) % 20 == 0 or idx + 1 == total:
@@ -2744,6 +2747,6 @@ def run_undo(undo_file, record, progress, label=None):
     progress.notify("plan_stale", None)  # the folder just changed
 
     verb = "restored" if op == "move" else "removed"
-    progress.log(f"\n✅ Undo complete: {restored} files {verb}, "
+    progress.log(f"\nUndo complete: {restored} files {verb}, "
              f"{problems} issue(s), {removed} empty folder(s) cleaned up")
     progress.status(f"Undo complete - {restored} files {verb}")

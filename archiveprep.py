@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Kjegla's Photo Organizer - the window.
+"""ArchivePrep - the window.
 
 Prepares a messy media collection for archival: sorts by camera model, finds
 duplicates by content, sets damaged files aside, repairs filenames that lie
 about their format, and can undo the lot.
 
 This file is the user interface and nothing else. All of the actual work
-lives in organizer_core.py, which knows nothing about tkinter - so the
+lives in archiveprep_core.py, which knows nothing about tkinter - so the
 behaviour can be tested, and driven, without a screen. What crosses between
 them is a Progress object going in, and statistics coming back.
 """
@@ -18,7 +18,7 @@ from pathlib import Path
 from tkinter import ttk, filedialog, messagebox, scrolledtext
 from types import SimpleNamespace
 
-import organizer_core as core
+import archiveprep_core as core
 
 # Sun Valley theme (modern Windows 11 look); optional
 try:
@@ -28,10 +28,10 @@ except ImportError:
     SV_TTK_AVAILABLE = False
 
 
-class PhotoOrganizerGUI:
+class ArchivePrepGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("Kjegla's Photo Organizer")
+        self.root.title("ArchivePrep")
         self.root.geometry("960x780")
 
         # Set icon (VLC cone if available)
@@ -82,7 +82,7 @@ class PhotoOrganizerGUI:
         error_frame = ttk.Frame(self.root, padding="20")
         error_frame.pack(fill=tk.BOTH, expand=True)
 
-        ttk.Label(error_frame, text="⚠️ Required Library Missing",
+        ttk.Label(error_frame, text="Required library missing",
                   font=('Arial', 14, 'bold')).pack(pady=10)
 
         msg = ("The 'Pillow' library is not installed.\n\n"
@@ -109,11 +109,11 @@ class PhotoOrganizerGUI:
         title_frame = ttk.Frame(main_frame)
         title_frame.grid(row=0, column=0, columnspan=3, pady=(0, 10), sticky=(tk.W, tk.E))
 
-        ttk.Label(title_frame, text="📷 Kjegla's Photo Organizer",
+        ttk.Label(title_frame, text="ArchivePrep",
                   font=('Segoe UI', 16, 'bold')).pack(side=tk.LEFT, expand=True)
 
         if SV_TTK_AVAILABLE:
-            self.theme_btn = ttk.Button(title_frame, text="☀️", width=3,
+            self.theme_btn = ttk.Button(title_frame, text="Light", width=7,
                                         command=self.toggle_theme)
             self.theme_btn.pack(side=tk.RIGHT)
 
@@ -169,31 +169,31 @@ class PhotoOrganizerGUI:
 
         self.raw_checkbox = ttk.Checkbutton(
             extras_frame,
-            text="📸 Separate RAW files into 'RAW' subfolder",
+            text="Separate RAW files into 'RAW' subfolder",
             variable=self.separate_raw)
         self.raw_checkbox.pack(anchor=tk.W, pady=3)
 
         self.screenshot_checkbox = ttk.Checkbutton(
             extras_frame,
-            text="📱 Separate Android screenshots",
+            text="Separate Android screenshots",
             variable=self.separate_screenshots)
         self.screenshot_checkbox.pack(anchor=tk.W, pady=3)
 
         self.subfolders_checkbox = ttk.Checkbutton(
             extras_frame,
-            text="🗂️ Include subfolders (scan recursively)",
+            text="Include subfolders (scan recursively)",
             variable=self.include_subfolders)
         self.subfolders_checkbox.pack(anchor=tk.W, pady=3)
 
         self.multithread_checkbox = ttk.Checkbutton(
             extras_frame,
-            text=f"⚡ Multithreaded scanning ({self.max_threads} threads)",
+            text=f"Multithreaded scanning ({self.max_threads} threads)",
             variable=self.use_multithreading)
         self.multithread_checkbox.pack(anchor=tk.W, pady=3)
 
         video_note = ttk.Label(
             extras_frame,
-            text="🎬 Videos go to a 'Videos' subfolder automatically.",
+            text="Videos go to a 'Videos' subfolder automatically.",
             font=('Segoe UI', 9), foreground='#888888', justify=tk.LEFT)
         video_note.pack(anchor=tk.W, pady=(6, 2))
 
@@ -204,13 +204,13 @@ class PhotoOrganizerGUI:
 
         self.dedupe_checkbox = ttk.Checkbutton(
             safety_frame,
-            text="♻️ Find duplicates by content (any filename)",
+            text="Find duplicates by content (any filename)",
             variable=self.dedupe_content)
         self.dedupe_checkbox.pack(anchor=tk.W, pady=3)
 
         self.corrupt_checkbox = ttk.Checkbutton(
             safety_frame,
-            text="🩺 Check files for damage while organizing",
+            text="Check files for damage while organizing",
             variable=self.check_corrupt, command=self._sync_thorough_state)
         self.corrupt_checkbox.pack(anchor=tk.W, pady=3)
 
@@ -222,13 +222,13 @@ class PhotoOrganizerGUI:
 
         self.fixext_checkbox = ttk.Checkbutton(
             safety_frame,
-            text="🏷️ Fix files whose extension doesn't match their contents",
+            text="Fix files whose extension doesn't match their contents",
             variable=self.fix_extensions)
         self.fixext_checkbox.pack(anchor=tk.W, pady=3)
 
         self.cleanup_checkbox = ttk.Checkbutton(
             safety_frame,
-            text="🧹 Delete empty folders left behind (Move only)",
+            text="Delete empty folders left behind (Move only)",
             variable=self.cleanup_empty)
         self.cleanup_checkbox.pack(anchor=tk.W, pady=3)
 
@@ -246,32 +246,32 @@ class PhotoOrganizerGUI:
         button_frame = ttk.Frame(main_frame)
         button_frame.grid(row=3, column=0, columnspan=3, pady=10)
 
-        self.preview_btn = ttk.Button(button_frame, text="🔍 Preview (Dry Run)",
+        self.preview_btn = ttk.Button(button_frame, text="Preview (Dry Run)",
                                       command=self.preview_operation)
         self.preview_btn.pack(side=tk.LEFT, padx=4)
 
-        self.check_btn = ttk.Button(button_frame, text="🩺 Check Files",
+        self.check_btn = ttk.Button(button_frame, text="Check Files",
                                     command=self.check_files_operation)
         self.check_btn.pack(side=tk.LEFT, padx=4)
 
-        self.execute_btn = ttk.Button(button_frame, text="▶️ Execute Operation",
+        self.execute_btn = ttk.Button(button_frame, text="Execute",
                                       command=self.execute_operation)
         self.execute_btn.pack(side=tk.LEFT, padx=4)
 
-        self.undo_btn = ttk.Button(button_frame, text="↩️ Undo Last Run",
+        self.undo_btn = ttk.Button(button_frame, text="Undo Last Run",
                                    command=self.undo_last_operation, state=tk.DISABLED)
         self.undo_btn.pack(side=tk.LEFT, padx=4)
 
-        self.undo_renames_btn = ttk.Button(button_frame, text="↩️ Undo Renames",
+        self.undo_renames_btn = ttk.Button(button_frame, text="Undo Renames",
                                            command=self.undo_renames,
                                            state=tk.DISABLED)
         self.undo_renames_btn.pack(side=tk.LEFT, padx=4)
 
-        self.stats_btn = ttk.Button(button_frame, text="📊 Statistics",
+        self.stats_btn = ttk.Button(button_frame, text="Statistics",
                                     command=self.show_statistics, state=tk.DISABLED)
         self.stats_btn.pack(side=tk.LEFT, padx=4)
 
-        self.cancel_btn = ttk.Button(button_frame, text="⏹️ Cancel",
+        self.cancel_btn = ttk.Button(button_frame, text="Cancel",
                                      command=self.cancel_operation, state=tk.DISABLED)
         self.cancel_btn.pack(side=tk.LEFT, padx=4)
 
@@ -325,7 +325,7 @@ class PhotoOrganizerGUI:
             return
         new_theme = "light" if sv_ttk.get_theme() == "dark" else "dark"
         sv_ttk.set_theme(new_theme)
-        self.theme_btn.config(text="☀️" if new_theme == "dark" else "🌙")
+        self.theme_btn.config(text="Light" if new_theme == "dark" else "Dark")
         self._style_text_widget(self.output_text)
 
     def show_statistics(self):
@@ -346,28 +346,28 @@ class PhotoOrganizerGUI:
         self._style_text_widget(stats_text)
 
         report = "=" * 50 + "\n"
-        report += "📊 PHOTO ORGANIZATION STATISTICS\n"
+        report += "ARCHIVE PREPARATION STATISTICS\n"
         report += "=" * 50 + "\n\n"
 
-        report += f"📁 Total files scanned: {self.stats['total_files']}\n"
-        report += f"✅ Successfully processed: {self.stats['processed']}\n"
-        report += f"⚠️  No metadata found: {self.stats['no_metadata']}\n"
-        report += f"❌ Errors encountered: {self.stats['errors']}\n"
-        report += f"📱 Screenshots detected: {self.stats['screenshots']}\n"
-        report += f"♻️ Identical duplicates skipped: {self.stats['duplicates']}\n"
-        report += (f"♻️ Duplicate copies set aside: "
+        report += f"Total files scanned:       {self.stats['total_files']}\n"
+        report += f"Successfully processed:    {self.stats['processed']}\n"
+        report += f"No metadata found:         {self.stats['no_metadata']}\n"
+        report += f"Errors encountered:        {self.stats['errors']}\n"
+        report += f"Screenshots detected:      {self.stats['screenshots']}\n"
+        report += f"Identical duplicates:      {self.stats['duplicates']}\n"
+        report += (f"Duplicate copies aside:   "
                    f"{self.stats['content_duplicates']} "
                    f"({self.stats['duplicate_bytes'] / (1024 * 1024):.2f} MB)\n")
-        report += f"🩹 Damaged files found: {self.stats['damaged']}\n"
-        report += f"🏷️ Wrong file extension: {self.stats['misnamed']}\n"
-        report += f"❓ Could not be checked: {self.stats['unchecked']}\n"
-        report += f"🧹 Empty folders removed: {self.stats['empty_folders_removed']}\n"
-        report += f"✔️ Already organized (untouched): {self.stats['already_organized']}\n"
-        report += f"💾 Total size processed: {self.stats['total_size_mb']:.2f} MB\n"
+        report += f"Damaged files found:       {self.stats['damaged']}\n"
+        report += f"Wrong file extension:      {self.stats['misnamed']}\n"
+        report += f"Could not be checked:      {self.stats['unchecked']}\n"
+        report += f"Empty folders removed:     {self.stats['empty_folders_removed']}\n"
+        report += f"Already organized:         {self.stats['already_organized']}\n"
+        report += f"Total size processed:      {self.stats['total_size_mb']:.2f} MB\n"
 
         if self.stats['by_model']:
             report += "\n" + "=" * 50 + "\n"
-            report += "📱 FILES BY CAMERA MODEL:\n"
+            report += "FILES BY CAMERA MODEL\n"
             report += "=" * 50 + "\n"
             for model, count in sorted(self.stats['by_model'].items(),
                                        key=lambda x: x[1], reverse=True):
@@ -375,14 +375,14 @@ class PhotoOrganizerGUI:
 
         if self.stats['by_year']:
             report += "\n" + "=" * 50 + "\n"
-            report += "📅 FILES BY YEAR:\n"
+            report += "FILES BY YEAR\n"
             report += "=" * 50 + "\n"
             for year, count in sorted(self.stats['by_year'].items()):
                 report += f"  {year}: {count} files\n"
 
         if self.stats.get('duration_seconds'):
             rate = self.stats['processed'] / self.stats['duration_seconds']
-            report += f"\n⚡ Processing speed: {rate:.1f} files/second\n"
+            report += f"\nProcessing speed:          {rate:.1f} files/second\n"
 
         stats_text.insert(1.0, report)
         stats_text.config(state=tk.DISABLED)
@@ -398,14 +398,14 @@ class PhotoOrganizerGUI:
             # Offer undo if the folder holds a not-yet-undone record. Both
             # patterns are checked so a run made with v35 or earlier, whose
             # record is a single .json object, can still be undone.
-            undo_files = sorted(list(Path(folder).glob("kjegla_undo_*.jsonl"))
-                                + list(Path(folder).glob("kjegla_undo_*.json")))
+            undo_files = sorted(list(Path(folder).glob("archiveprep_undo_*.jsonl"))
+                                + list(Path(folder).glob("archiveprep_undo_*.json")))
             self.last_undo_file = str(undo_files[-1]) if undo_files else None
             rename_undos = sorted(
                 list((Path(folder) / core.WRONG_EXT_FOLDER)
-                     .glob("kjegla_undo_renames_*.jsonl"))
+                     .glob("archiveprep_undo_renames_*.jsonl"))
                 + list((Path(folder) / core.WRONG_EXT_FOLDER)
-                       .glob("kjegla_undo_renames_*.json")))
+                       .glob("archiveprep_undo_renames_*.json")))
             self.last_rename_undo_file = (str(rename_undos[-1])
                                           if rename_undos else None)
             if not self.processing:
@@ -528,7 +528,7 @@ class PhotoOrganizerGUI:
             try:
                 work(self.progress)
             except Exception as e:
-                self.log(f"\n❌ Unexpected error: {e}")
+                self.log(f"\n[error] unexpected:  {e}")
             finally:
                 self.processing = False
                 self.queue.put(("enable_buttons", None, None))
@@ -572,7 +572,7 @@ class PhotoOrganizerGUI:
         operation = self.operation_mode.get()
         cache_ready = (self.cached_plan is not None and
                        self.cached_plan['key'] == core.plan_key(self._snapshot_settings()))
-        cache_note = ("\n\n⚡ Your preview will be reused - no re-scan needed "
+        cache_note = ("\n\nYour preview will be reused - no re-scan needed "
                       "(unless the folder changed since then)." if cache_ready else "")
         result = messagebox.askyesno(
             "Confirm Operation",
@@ -689,7 +689,7 @@ def main():
     root = tk.Tk()
     if SV_TTK_AVAILABLE:
         sv_ttk.set_theme("dark")
-    app = PhotoOrganizerGUI(root)
+    app = ArchivePrepGUI(root)
     root.mainloop()
 
 
