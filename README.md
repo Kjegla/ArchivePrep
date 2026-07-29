@@ -3,7 +3,7 @@
 **Turns an unknown, messy media collection into a clean, understood archive you
 can merge into long-term storage with confidence.**
 
-> **v4.4 is the current release** and supersedes v34, which shipped under the
+> **v4.5 is the current release** and supersedes v34, which shipped under the
 > project's former name, Kjegla's Photo Organizer. Despite the lower number,
 > v4 is newer: it is a new architectural generation rather than the next
 > increment. See [STATUS.md](STATUS.md) for what changed.
