@@ -3,9 +3,9 @@
 **Turns an unknown, messy media collection into a clean, understood archive you
 can merge into long-term storage with confidence.**
 
-> **v4.0 is the current release** and supersedes v34, which shipped under the
+> **v4.1 is the current release** and supersedes v34, which shipped under the
 > project's former name, Kjegla's Photo Organizer. Despite the lower number,
-> v4.0 is newer: it is a new architectural generation rather than the next
+> v4 is newer: it is a new architectural generation rather than the next
 > increment. See [STATUS.md](STATUS.md) for what changed.
 
 Media collections get messy on their own. People change phones. Cloud providers
@@ -172,5 +172,5 @@ there because a real photo was once judged wrongly.
 
 ```bash
 pip install -r requirements.txt pyinstaller
-python -m PyInstaller --onefile --windowed --noconfirm --collect-all sv_ttk --name ArchivePrep archiveprep.py
+python -m PyInstaller --onefile --windowed --noconfirm --name ArchivePrep archiveprep.py
 ```

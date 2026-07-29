@@ -39,7 +39,7 @@ jobs:
       - name: Run the full suite, including the window-wiring tests
         run: python -m pytest tests/ -q
       - name: Build exe
-        run: python -m PyInstaller --onefile --windowed --noconfirm --collect-all sv_ttk --name ArchivePrep archiveprep.py
+        run: python -m PyInstaller --onefile --windowed --noconfirm --name ArchivePrep archiveprep.py
       - name: Rename artifact
         run: Move-Item dist/ArchivePrep.exe dist/ArchivePrep-Windows.exe
       - uses: actions/upload-artifact@v7
@@ -65,7 +65,7 @@ jobs:
       - name: Run the full suite
         run: python -m pytest tests/ -q
       - name: Build app
-        run: python -m PyInstaller --windowed --noconfirm --collect-all sv_ttk --name ArchivePrep archiveprep.py
+        run: python -m PyInstaller --windowed --noconfirm --name ArchivePrep archiveprep.py
       - name: Zip the app bundle
         run: ditto -c -k --keepParent "dist/ArchivePrep.app" "dist/ArchivePrep-macOS.zip"
       - uses: actions/upload-artifact@v7

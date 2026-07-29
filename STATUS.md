@@ -1,11 +1,11 @@
-# ArchivePrep - v4.0 status
+# ArchivePrep - v4 status
 
-**v4.0 is released** and supersedes [v34](../../releases), which shipped under
-the project's former name, Kjegla's Photo Organizer.
+**v4.1 is the current release** and supersedes [v34](../../releases), which
+shipped under the project's former name, Kjegla's Photo Organizer.
 
 The number goes down while the software goes forward: v22 through v35 were
-increments of a single script, and v4.0 is the first release of a new
-architectural generation, not the next step in that sequence. `v35-wip`
+increments of a single script, and v4 is a new architectural generation, not
+the next step in that sequence. `v35-wip`
 remains on the repository as the historical snapshot of the last script-based
 version.
 

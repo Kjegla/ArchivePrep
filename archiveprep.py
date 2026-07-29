@@ -20,12 +20,17 @@ from types import SimpleNamespace
 
 import archiveprep_core as core
 
-# Sun Valley theme (modern Windows 11 look); optional
-try:
-    import sv_ttk
-    SV_TTK_AVAILABLE = True
-except ImportError:
-    SV_TTK_AVAILABLE = False
+# The window uses whatever ttk theme the operating system provides - on Windows
+# that means the widgets are drawn by the OS itself.
+#
+# It previously used sv-ttk, which imitates Windows 11 by compositing every
+# widget from sprite images in software. Measured with the real window: an
+# empty window cost 5ms to maximise, but this one - 47 widgets - cost 2,245ms,
+# against 136ms with the native theme, and 783ms of startup against 226ms. The
+# cost is per widget, so it grew with the window: a maximise on a 1440p screen
+# took around five seconds and repainted blank while it worked.
+#
+# Losing it also lost dark mode, which was a real trade and a deliberate one.
 
 
 class ArchivePrepGUI:
@@ -99,17 +104,12 @@ class ArchivePrepGUI:
         self.root.minsize(920, 720)
         main_frame.columnconfigure(1, weight=1)
 
-        # Title row with theme toggle
+        # Title
         title_frame = ttk.Frame(main_frame)
         title_frame.grid(row=0, column=0, columnspan=3, pady=(0, 10), sticky=(tk.W, tk.E))
 
         ttk.Label(title_frame, text="ArchivePrep",
                   font=('Segoe UI', 16, 'bold')).pack(side=tk.LEFT, expand=True)
-
-        if SV_TTK_AVAILABLE:
-            self.theme_btn = ttk.Button(title_frame, text="Light", width=7,
-                                        command=self.toggle_theme)
-            self.theme_btn.pack(side=tk.RIGHT)
 
         # Source folder selection
         ttk.Label(main_frame, text="Source Folder:").grid(
@@ -297,30 +297,11 @@ class ArchivePrepGUI:
                    command=self.clear_log).grid(row=1, column=0, pady=5)
 
         main_frame.rowconfigure(6, weight=1)
-        self._style_text_widget(self.output_text)
 
     def _sync_thorough_state(self):
         """The thorough toggle only means anything when checking is switched on."""
         self.thorough_checkbox.config(
             state=tk.NORMAL if self.check_corrupt.get() else tk.DISABLED)
-
-    def _style_text_widget(self, widget):
-        """Match a plain tk Text widget to the current sv-ttk theme."""
-        if not SV_TTK_AVAILABLE:
-            return
-        if sv_ttk.get_theme() == "dark":
-            widget.config(bg="#1c1c1c", fg="#e8e8e8", insertbackground="#e8e8e8")
-        else:
-            widget.config(bg="#fdfdfd", fg="#1a1a1a", insertbackground="#1a1a1a")
-
-    def toggle_theme(self):
-        """Switch between the dark and light Sun Valley themes."""
-        if not SV_TTK_AVAILABLE:
-            return
-        new_theme = "light" if sv_ttk.get_theme() == "dark" else "dark"
-        sv_ttk.set_theme(new_theme)
-        self.theme_btn.config(text="Light" if new_theme == "dark" else "Dark")
-        self._style_text_widget(self.output_text)
 
     def show_statistics(self):
         """Show statistics in a popup window."""
@@ -337,7 +318,6 @@ class ArchivePrepGUI:
                                                font=('Consolas', 10),
                                                borderwidth=0)
         stats_text.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
-        self._style_text_widget(stats_text)
 
         report = "=" * 50 + "\n"
         report += "ARCHIVE PREPARATION STATISTICS\n"
@@ -681,8 +661,6 @@ class ArchivePrepGUI:
 
 def main():
     root = tk.Tk()
-    if SV_TTK_AVAILABLE:
-        sv_ttk.set_theme("dark")
     app = ArchivePrepGUI(root)
     root.mainloop()
 
