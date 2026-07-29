@@ -132,8 +132,8 @@ Grab the file for your computer from [**Releases**](../../releases):
 Requires [Python 3.10+](https://www.python.org/downloads/).
 
 ```bash
-git clone https://github.com/Kjegla/Photo-Organizer.git
-cd Photo-Organizer
+git clone https://github.com/Kjegla/ArchivePrep.git
+cd ArchivePrep
 pip3 install -r requirements.txt
 python3 archiveprep.py
 ```
