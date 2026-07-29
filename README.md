@@ -1,11 +1,12 @@
 # ArchivePrep
 
-> **⚠️ This branch is a work in progress - not a release.**
-> The released version is [**v34**](../../releases), under the project's former
-> name. See [STATUS.md](STATUS.md) for what is proven and what is not.
-
 **Turns an unknown, messy media collection into a clean, understood archive you
 can merge into long-term storage with confidence.**
+
+> **v4.0 is the current release** and supersedes v34, which shipped under the
+> project's former name, Kjegla's Photo Organizer. Despite the lower number,
+> v4.0 is newer: it is a new architectural generation rather than the next
+> increment. See [STATUS.md](STATUS.md) for what changed.
 
 Media collections get messy on their own. People change phones. Cloud providers
 change. Backups get duplicated. Exports arrive from different ecosystems. Old
