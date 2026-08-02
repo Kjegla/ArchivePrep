@@ -96,22 +96,6 @@ def say(progress, log_file, message):
     log_file.write(message.lstrip('\n') + "\n")
 
 
-def mtime_datetime(path):
-    """The file's modified time, or None when it does not have a usable one.
-
-    Windows raises OSError for a timestamp outside the range it can express,
-    and real archives contain files carrying one - a RAW straight off a card
-    whose clock was never set, or a byte-level recovery. This is the last
-    date source there is, so when it fails the honest answer is that the
-    date is unknown. Losing the whole file over an unreadable date would be
-    a far worse trade than filing it under Unknown Date.
-    """
-    try:
-        return datetime.fromtimestamp(path.stat().st_mtime)
-    except (OSError, ValueError, OverflowError):
-        return None
-
-
 # EXIF tag ids (base IFD)
 TAG_MAKE = 271
 TAG_MODEL = 272
@@ -387,6 +371,70 @@ def camera_from_filename(file_path):
     for prefix, camera in FILENAME_CAMERA_PREFIXES:
         if name.startswith(prefix):
             return camera
+    return None
+
+
+# Cameras and phone apps that stamp the capture time into the filename, and
+# the only names a date is ever read from.
+#
+# Anchored to the start on purpose. A date found loose inside a name is as
+# likely to be wrong as right: a real archive turned up 30 files called
+# "Facetune_03-03-2019-21-05-08", which is DD-MM-YYYY and would be read as
+# an entirely different month and day. A time of day is required as well,
+# because that is what tells a capture stamp apart from a number that merely
+# has eight digits in it.
+#
+# Messaging apps are deliberately absent - "IMG-20230510-WA0001" and
+# "signal-2024-01-15" are real shapes, but they change between app versions,
+# and the whole value of this list is that every entry is a scheme its maker
+# publishes and keeps.
+FILENAME_DATE_PATTERNS = (
+    # Pixel and most Android cameras:
+    #   IMG_20200904_144311  VID_20200904_144311  PXL_20251103_092233580
+    re.compile(r'^(?:IMG|VID|MVIMG|PXL|PANO|BURST)[-_]'
+               r'(\d{4})(\d{2})(\d{2})[-_](\d{2})(\d{2})(\d{2})'),
+    # Samsung, and several export tools:  20240610_101512
+    re.compile(r'^(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})'),
+    # Android screenshots:  Screenshot_20240301-142205
+    re.compile(r'^Screenshot[-_](\d{4})(\d{2})(\d{2})[-_](\d{2})(\d{2})(\d{2})'),
+    # Screenshot_2024-03-01-14-22-05
+    re.compile(r'^Screenshot[-_](\d{4})-(\d{2})-(\d{2})'
+               r'[-_](\d{2})[-_.](\d{2})[-_.](\d{2})'),
+    # macOS:  Screen Shot 2024-03-01 at 14.22.05
+    re.compile(r'^Screen[ _]?[Ss]hot[-_ ](\d{4})-(\d{2})-(\d{2})'
+               r'[ _]at[ _](\d{2})[.-](\d{2})[.-](\d{2})'),
+)
+
+
+def date_from_filename(file_path):
+    """The capture time a camera wrote into the filename, or None.
+
+    The last question asked before giving up, and only ever reached once the
+    file's own metadata, its Takeout sidecar and the photo it was captured
+    with have all come up empty. So the only thing it can displace is a guess.
+
+    That is what makes it worth doing. On an export the file's modified time
+    is the day it was downloaded - one real collection had 7,511 photos
+    filed under five days in 2026 for exactly that reason - and a thousand of
+    them were carrying their true date in their own name the whole time.
+
+    Only the patterns above are trusted, and only at the start of the name.
+    Anything else is None: an honest Unknown Date beats a month read out of a
+    number that happened to look like one.
+    """
+    name = file_path.name
+    for pattern in FILENAME_DATE_PATTERNS:
+        match = pattern.match(name)
+        if not match:
+            continue
+        try:
+            taken = datetime(*(int(part) for part in match.groups()))
+        except ValueError:
+            continue        # 13 months, the 31st of February, and near misses
+        # A camera cannot have taken a photo tomorrow, and a "date" before
+        # digital cameras existed is somebody's serial number, not a day.
+        if datetime(1990, 1, 1) <= taken <= datetime.now():
+            return taken
     return None
 
 
@@ -1092,12 +1140,20 @@ class MediaFile:
     """
     path: Path
     size: int = 0
+    # Recorded, never acted on. The modified time is not a capture date - see
+    # date_from_filename() - but throwing it away would leave no way to check
+    # that judgement afterwards. In the manifest you can see for yourself
+    # whether a collection's timestamps are the day it was downloaded or
+    # something worth going back for.
+    modified: float = 0.0
 
     # what it is
     kind: str = 'image'                    # image | video | raw
     camera_model: str = None
     captured_at: datetime = None
-    date_source: str = 'none'              # exif | video | mtime | none
+    # Where the date came from, best evidence first. The file's modified time
+    # is deliberately not on this list: see date_from_filename().
+    date_source: str = 'none'  # exif|video|sidecar|capture|filename|unknown|none
     is_screenshot: bool = False
 
     # can it be trusted - exactly what file_health() said
@@ -1149,6 +1205,17 @@ def _empty_stats():
         'damaged': 0,
         'misnamed': 0,
         'unchecked': 0,
+        # ...and what was decided about them, which is not the same number.
+        # Setting a damaged file aside and renaming a misnamed one are both
+        # gated on the user's settings, and a file that is also a duplicate
+        # goes to Duplicates instead. The summary has to report these, not
+        # the counts above, or it claims work it was told not to do.
+        'damaged_aside': 0,
+        'misnamed_fixed': 0,
+        'misnamed_breaking': 0,
+        # Where the dates came from, for the two rungs worth saying out loud
+        'dated_by_filename': 0,
+        'no_date': 0,
         'empty_folders_removed': 0,
         'duplicate_bytes': 0,
         'already_organized': 0,
@@ -1299,7 +1366,8 @@ def _scan_files(paths, settings, progress, p0=0, p1=25):
     def scan(path):
         mf = MediaFile(path=path)
         try:
-            mf.size = path.stat().st_size
+            stat = path.stat()
+            mf.size, mf.modified = stat.st_size, stat.st_mtime
         except OSError:
             pass
         if is_raw_file(path):
@@ -1720,6 +1788,18 @@ def _write_duplicate_report(report_path, groups, source_path):
         pass
 
 
+def mtime_text(stamp):
+    """A file's modified time, readable, or blank when it has none we can
+    express. Windows refuses timestamps outside its range and real archives
+    hold them - a card whose clock was never set, a byte-level recovery."""
+    if not stamp:
+        return ''
+    try:
+        return datetime.fromtimestamp(stamp).isoformat(' ', 'seconds')
+    except (OSError, ValueError, OverflowError):
+        return ''
+
+
 def write_manifest(manifest_path, records, source_path):
     """One row per file: what it was, what was decided, and where it went.
 
@@ -1731,8 +1811,8 @@ def write_manifest(manifest_path, records, source_path):
     """
     columns = ['original_path', 'action', 'target_path', 'reason', 'size_bytes',
                'content_hash', 'kind', 'camera_model', 'captured_at',
-               'date_source', 'is_screenshot', 'verdict', 'verdict_reason',
-               'extension', 'duplicate_of', 'capture_id']
+               'date_source', 'modified', 'is_screenshot', 'verdict',
+               'verdict_reason', 'extension', 'duplicate_of', 'capture_id']
     try:
         with open(manifest_path, 'w', encoding='utf-8', newline='') as f:
             writer = csv.writer(f)
@@ -1750,7 +1830,8 @@ def write_manifest(manifest_path, records, source_path):
                     mf.content_hash.hex() if mf.content_hash else '',
                     mf.kind, mf.camera_model or '',
                     mf.captured_at.isoformat(' ') if mf.captured_at else '',
-                    mf.date_source, 'yes' if mf.is_screenshot else 'no',
+                    mf.date_source, mtime_text(mf.modified),
+                    'yes' if mf.is_screenshot else 'no',
                     mf.verdict, mf.verdict_reason, mf.extension,
                     rel(mf.duplicate_of), mf.capture_id,
                 ])
@@ -1778,38 +1859,87 @@ def _build_model_index(records):
     return index
 
 
-def _write_run_summary(progress, log_file, stats, duration):
+def _write_run_summary(progress, log_file, stats, duration, dry_run):
     """The end-of-run tally, to the window and to the log file alike."""
     # One summary, written to both. It used to be written twice with two sets
     # of labels - "Total media files" in the window against "Total files" in
     # the file - which made the two disagree about the same run.
+    #
+    # A preview says "would" and a real run says "did". The summary was the
+    # last part of a dry run still written as though it had already happened,
+    # under a header that says DRY RUN and above a log where every line says
+    # "would move to".
+    tense = lambda would, did: would if dry_run else did     # noqa: E731
+
     progress.log("\n" + "=" * 60)
     log_file.write("\n" + "=" * 60 + "\n")
     say(progress, log_file, "SUMMARY:")
     say(progress, log_file, f"Total media files: {stats['total_files']}")
-    say(progress, log_file, f"Files processed: {stats['processed']}")
+    say(progress, log_file,
+        f"{tense('Files that would be processed', 'Files processed')}: "
+        f"{stats['processed']}")
     say(progress, log_file, f"Files without metadata: {stats['no_metadata']}")
     say(progress, log_file, f"Screenshots detected: {stats['screenshots']}")
     if stats['content_duplicates']:
         wasted = stats['duplicate_bytes'] / (1024 * 1024)
         say(progress, log_file,
-            f"Duplicate copies set aside: {stats['content_duplicates']} "
+            f"Duplicate copies {tense('to set aside', 'set aside')}: "
+            f"{stats['content_duplicates']} "
             f"({wasted:.2f} MB) -> '{DUPLICATES_FOLDER}' folder")
     if stats['damaged']:
-        say(progress, log_file, f"Damaged files found: {stats['damaged']} "
-                                f"-> '{CORRUPT_FOLDER}' folder")
+        # Found and dealt with are two different numbers. Setting a damaged
+        # file aside only happens when the user asked for damage checking.
+        if stats['damaged_aside']:
+            say(progress, log_file, f"Damaged files found: {stats['damaged']} "
+                f"-> {tense('would go to', 'moved to')} "
+                f"'{CORRUPT_FOLDER}' folder")
+        else:
+            say(progress, log_file, f"Damaged files found: {stats['damaged']} "
+                f"- left where they are, because 'Check files for damage' "
+                f"is off")
     if stats['misnamed']:
+        # Not all wrong names cost the same, and this is the line that gets
+        # read. A photo called .MOV is handed to a video player and will not
+        # open at all; a WEBP called .png displays everywhere and needs
+        # nothing done to it. One undifferentiated number turns a handful of
+        # real problems into hundreds of things to worry about.
+        breaking = stats['misnamed_breaking']
+        harmless = stats['misnamed'] - breaking
+        cost = (f"{breaking} will not open at all, {harmless} open fine anyway"
+                if breaking and harmless else
+                "none of them will open at all" if breaking else
+                "none of them will fail to open")
+        # Named after the checkbox that controls them, so there is nothing to
+        # translate between the option you ticked and the line you read.
+        found = (f"Files whose extension doesn't match their contents: "
+                 f"{stats['misnamed']} - {cost}")
+        # This line used to report the count above as the number "fixed",
+        # whatever the settings said. A run with extension repair switched
+        # off reported 804 files renamed and had not touched one of them.
+        if stats['misnamed_fixed']:
+            say(progress, log_file,
+                f"{found}. {stats['misnamed_fixed']} "
+                f"{tense('would be', 'were')} renamed to the right extension "
+                f"and moved to '{WRONG_EXT_FOLDER}' (their contents were fine)")
+        else:
+            say(progress, log_file,
+                f"{found}. Nothing was renamed: that option is off")
+    if stats['dated_by_filename']:
         say(progress, log_file,
-            f"Wrongly-named files fixed: {stats['misnamed']} "
-            f"-> renamed to the right extension and moved to "
-            f"'{WRONG_EXT_FOLDER}' (their contents were fine)")
+            f"Dated from their filename: {stats['dated_by_filename']} "
+            f"(nothing in the file itself said when it was taken)")
+    if stats['no_date']:
+        say(progress, log_file,
+            f"No readable date: {stats['no_date']} -> "
+            f"{tense('would go to', 'filed under')} 'Unknown Date'")
     if stats['unchecked']:
         say(progress, log_file,
             f"Files that could not be checked: {stats['unchecked']} "
             f"(RAW / some video formats)")
     if stats['duplicates']:
         say(progress, log_file,
-            f"Identical duplicates skipped: {stats['duplicates']}")
+            f"Identical duplicates {tense('to skip', 'skipped')}: "
+            f"{stats['duplicates']}")
     if stats['already_organized']:
         say(progress, log_file,
             f"Already organized (untouched): {stats['already_organized']}")
@@ -1828,10 +1958,12 @@ def _write_run_summary(progress, log_file, stats, duration):
     if stats['no_metadata'] > 0:
         say(progress, log_file,
             f"\nUnknown/unmatched files: {stats['no_metadata']} "
-            f"(moved to 'Unknown Camera' folder)")
+            f"({tense('would be moved to', 'moved to')} "
+            f"'Unknown Camera' folder)")
     if stats['screenshots'] > 0:
         say(progress, log_file,
-            f"\nScreenshots separated: {stats['screenshots']} files")
+            f"\nScreenshots {tense('to separate', 'separated')}: "
+            f"{stats['screenshots']} files")
 
 
 def organize_photos(settings, progress, dry_run=True):
@@ -1871,6 +2003,10 @@ def organize_photos(settings, progress, dry_run=True):
         "Check files for damage: "
         + (('Yes (thorough)' if settings.corrupt_thorough else 'Yes')
            if settings.check_corrupt else 'No'),
+        # Worth recording for the same reason as the rest: it decides
+        # whether wrongly-named files are repaired or merely counted, and
+        # the summary reports on them either way.
+        f"Fix wrong file extensions: {yes_no(settings.fix_extensions)}",
         f"Delete empty folders: {yes_no(settings.cleanup_empty)}",
     ]
     progress.log("=" * 60)
@@ -2015,6 +2151,26 @@ def organize_photos(settings, progress, dry_run=True):
                 say(progress, log_file, "   Skipping this file and continuing...")
                 stats['errors'] += 1
 
+        # What the summary claims happened has to be what was decided here.
+        # These used to be the scan's counts - how many files LOOK misnamed -
+        # while the renaming of them is gated on a setting the user can turn
+        # off. With extension repair off, a run reported 804 files renamed
+        # and moved, and had not touched one of them. Counted before APPLY
+        # on purpose: a move that then fails gets its own honest block from
+        # _report_failures, and is not quietly subtracted from here.
+        actions = [mf.action for mf in records.values()]
+        stats['damaged_aside'] = actions.count('corrupt')
+        stats['misnamed_fixed'] = actions.count('wrong_extension')
+        stats['misnamed_breaking'] = sum(1 for mf in records.values()
+                                         if mf.verdict == 'misnamed'
+                                         and mf.extension == 'breaking')
+        # The bottom two rungs of the date ladder, counted here because that
+        # is where they are decided. Both change where a file lands, so both
+        # are worth saying rather than leaving to be discovered by browsing.
+        sources = [mf.date_source for mf in records.values()]
+        stats['dated_by_filename'] = sources.count('filename')
+        stats['no_date'] = sources.count('unknown')
+
         # ---- APPLY -------------------------------------------------------
         undo_entries, rename_entries = [], []
         if not dry_run:
@@ -2048,7 +2204,7 @@ def organize_photos(settings, progress, dry_run=True):
 
         duration = (datetime.now() - start_time).total_seconds()
         stats['duration_seconds'] = duration
-        _write_run_summary(progress, log_file, stats, duration)
+        _write_run_summary(progress, log_file, stats, duration, dry_run)
         progress.log(f"\nLog file saved: {log_filename}")
 
     # ---- REPORT ----------------------------------------------------------
@@ -2418,12 +2574,18 @@ def _plan_one_file(mf, source_path, settings, base_name_to_model, ctx,
     if separate_shot:
         file_type += " (Screenshot)"
 
-    # Date: metadata (EXIF / video header) if available, else modified time -
-    # and if even that is unreadable, the date is honestly unknown rather than
-    # the file being dropped.
+    # Last rung of the date ladder. EXIF, the Takeout sidecar and the photo
+    # this one was captured with have all been asked by now; the name is what
+    # is left. If it says nothing either, the date is honestly unknown.
+    #
+    # The file's modified time used to sit here and no longer does. On any
+    # collection that arrived as a download it is the day it was extracted,
+    # not the day the photo was taken - 7,511 files in one real archive were
+    # filed under five days in 2026 on that basis. A wrong year disappears
+    # into an archive forever; Unknown Date is a pile you can come back to.
     if mf.captured_at is None:
-        mf.captured_at = mtime_datetime(file_path)
-        mf.date_source = 'mtime' if mf.captured_at else 'unknown'
+        mf.captured_at = date_from_filename(file_path)
+        mf.date_source = 'filename' if mf.captured_at else 'unknown'
 
     target_folder = get_target_folder(source_path, file_path, mf.camera_model,
                                       mf.captured_at, settings, separate_shot)

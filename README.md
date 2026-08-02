@@ -74,11 +74,33 @@ sitting inside the photo, never by its name.
 If a file's camera cannot be established from its metadata or from the photos
 it was captured with, it goes to `Unknown Camera` and stays there.
 
-The same goes for dates. A file whose date cannot be read from anything - not
-its metadata, not the photos it was captured with, and not even its own
-modified time, which some files carry in a form the operating system refuses -
-is filed under `Unknown Date` rather than being dropped or assigned a year to
-fill the gap.
+The same goes for dates, and they are asked for in this order:
+
+1. the file's own metadata - EXIF, or a video container's header
+2. Google Takeout's sidecar, where Google stripped the metadata
+3. the photo it was captured with - a RAW takes its JPEG's date
+4. **its filename**, but only where a camera stamped the capture time into it:
+   `IMG_20200904_144311`, `PXL_20251103_092233580`, `20240610_101512`,
+   `Screenshot_20240301-142205`
+5. `Unknown Date`
+
+**The file's modified time is not on that list, deliberately.** On anything
+that arrived as a download it is the day you extracted the zip - one real
+archive had 7,511 photos filed under five days in 2026 on exactly that basis,
+and a thousand of them were carrying their true date in their own name the
+whole time.
+
+A date is only ever read from a filename shape a manufacturer publishes, and
+only from the start of the name. A file called
+`Facetune_03-03-2019-21-05-08.jpg` is `DD-MM-YYYY` and is left alone rather
+than read as a different month and day. **A wrong year vanishes into an
+archive and is never found again; `Unknown Date` is a pile you can come back
+to.**
+
+The modified time is still **recorded** in the manifest for every file, next
+to the date that was actually used. It is not thrown away - it is just not
+allowed to decide where a photo goes. If you ever want to overrule that, the
+evidence is in the file.
 
 That is not a failure - it is the honest answer, and an archive you can trust
 is worth more than one where things were guessed into place.
@@ -99,7 +121,7 @@ is worth more than one where things were guessed into place.
 
 | File | What it holds |
 |---|---|
-| `archiveprep_manifest_*.csv` | One row per file: what it was, what was decided, where it went, its camera, its date **and where that date came from**, its integrity verdict, its content hash where one was computed. This is what to read when merging into an existing archive. |
+| `archiveprep_manifest_*.csv` | One row per file: what it was, what was decided, where it went, its camera, its date **and where that date came from**, its modified time, its integrity verdict, its content hash where one was computed. This is what to read when merging into an existing archive. |
 | `archiveprep_log_*.txt` | Everything the run did, in order |
 | `archiveprep_duplicates_*.txt` | Every set of identical files and which copy was kept |
 | `archiveprep_health_*.txt` | From **Check Files**, which moves nothing |
@@ -110,6 +132,13 @@ and every occurrence is highlighted where it sits, with a count and
 file?" is answered without opening the `.txt`. It keeps counting while a run is
 still printing, and it does not scroll the log out from under you while it
 does. `Ctrl+F` jumps to it, `Enter` and `Shift+Enter` step, `Esc` clears it.
+
+**The summary reports what the run decided, not what it noticed.** A preview
+says what it *would* do; a real run says what it did. A count of files that
+look wrongly named is never reported as a count of files repaired — if the
+repair is switched off, the summary says so and says how many of those names
+actually stop a file opening. The run header records every setting that was
+in force, so the log can always be checked against what was asked for.
 
 **The window and the run log say the same words.** A line read in the `.txt`
 can be pasted into Find and located in the window, and the reverse. They are
@@ -207,7 +236,7 @@ pip3 install -r requirements-dev.txt
 python -m pytest tests/ -q
 ```
 
-107 tests, 419 checks. They build real photos and videos in a temporary folder
+113 tests, 467 checks. They build real photos and videos in a temporary folder
 and run the real code against them, so a passing run means the real thing
 works - not a simplified copy of it. Every test starts from a clean folder, so
 you can run just the one you care about:

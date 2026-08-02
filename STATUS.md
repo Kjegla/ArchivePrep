@@ -55,6 +55,18 @@ from its own metadata or from the photos it was captured with, Unknown is the
 correct answer and it stays. The measure of the result is whether the archive
 is understandable and trustworthy - not how few files are Unknown.
 
+**The file's modified time is no longer a date source.** Measured on a real
+86,791-file collection: 7,622 files were being dated by it, and 7,511 of those
+landed on five days in 2026 - the days the Takeout zips were extracted. A
+filename stamped by the camera (`IMG_20200904_144311`, `PXL_20251103_...`) now
+sits in that slot for the 1,011 it can answer for; the remaining 6,611 go to
+`Unknown Date`.
+
+The cost is real and worth stating: a folder copied off an old drive **with
+its timestamps intact** now goes to `Unknown Date` too. In that collection
+that was 68 files against 7,511 filed under a download date. Restoring it is
+one line if a collection ever justifies it.
+
 ## Where it stands
 
 Four tiers are done. Every one ended with the full suite green.
@@ -66,7 +78,7 @@ Four tiers are done. Every one ended with the full suite green.
 | **3 Structure** | Core split from the window; one record per file; deciding split from doing; per-run manifest; CI runs the tests |
 | **4 Understanding** | One place that identifies a file; Takeout sidecar dates; captures; embedded motion clips |
 
-**107 tests, 419 checks.** 100 of them need no screen at all.
+**113 tests, 467 checks.** 106 of them need no screen at all.
 
 ```bash
 pip3 install -r requirements-dev.txt

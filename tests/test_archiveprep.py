@@ -79,15 +79,21 @@ def test_dry_run_then_copy_then_rerun():
         "Samsung Galaxy S23 Ultra/2023/06-June/Videos/clip.mp4",
         "Sony A6000/2022/01-January/DSC00001.JPG",
         "Sony A6000/2022/01-January/RAW/DSC00001.ARW",
-        "Unknown Camera/2021/07-July/RAW/DSC09999.ARW",
-        "Unknown Camera/2021/07-July/Videos/lonely.mp4",
         "Unknown Camera/2019/06-June/Videos/dated_video.mp4",
-        "Unknown Camera/2021/07-July/Screenshots/Screenshot_20240101-120000.png",
-        "Unknown Camera/2021/07-July/Screenshots/unnamed.png",
-        "Unknown Camera/2021/07-July/class_photo.jpg",
-        "Unknown Camera/2021/07-July/IMG_0001.png",
-        "iPhone/2021/07-July/IMG_5555.HEIC",
-        "iPhone/2021/07-July/Videos/IMG_5555.MOV",
+        # Its name says 2024-01-01 and its modified time says 2021-07-15.
+        # The name is the capture; the timestamp is whenever the file was
+        # last written. Every one of these used to be filed under 2021.
+        "Unknown Camera/2024/01-January/Screenshots/Screenshot_20240101-120000.png",
+        # Nothing knows when these were taken - not their metadata, not a
+        # sibling, not their name. They used to be filed under the modified
+        # time's year anyway. Unknown is the honest answer.
+        "Unknown Camera/Unknown Date/RAW/DSC09999.ARW",
+        "Unknown Camera/Unknown Date/Videos/lonely.mp4",
+        "Unknown Camera/Unknown Date/Screenshots/unnamed.png",
+        "Unknown Camera/Unknown Date/class_photo.jpg",
+        "Unknown Camera/Unknown Date/IMG_0001.png",
+        "iPhone/Unknown Date/IMG_5555.HEIC",
+        "iPhone/Unknown Date/Videos/IMG_5555.MOV",
         "iPhone 14 Pro/2023/12-December/real_iphone.heic",
     ]
     for e in expected:
@@ -1248,6 +1254,26 @@ def test_manifest_records_every_file_and_what_became_of_it():
     check(by_name['DSC09999.ARW']['capture_id']
           != by_name['DSC00001.ARW']['capture_id'],
           "...and is not lumped into someone else's capture")
+    # The modified time is not a capture date and is not used as one, but
+    # discarding it would leave no way to check that judgement afterwards.
+    dateless = by_name['class_photo.jpg']
+    check(dateless['date_source'] == 'unknown',
+          f"no date could be established (got {dateless['date_source']})")
+    check(dateless['captured_at'] == '',
+          f"...so none was invented (got {dateless['captured_at']!r})")
+    check(dateless['modified'].startswith('2021-07-15'),
+          f"...but the modified time is still on the record, for anyone who "
+          f"wants to judge it for themselves (got {dateless['modified']!r})")
+
+    # The clearest case of why the timestamp is not the date: this file's name
+    # says 2024 and its timestamp says 2021, and both are in the manifest.
+    shot = by_name['Screenshot_20240101-120000.png']
+    check(shot['date_source'] == 'filename',
+          f"the screenshot took its date from its name (got {shot['date_source']})")
+    check(shot['captured_at'].startswith('2024-01-01')
+          and shot['modified'].startswith('2021-07-15'),
+          f"...2024 from the name, 2021 on disk, both recorded "
+          f"(got {shot['captured_at']!r} / {shot['modified']!r})")
 
     screenshot = by_name['Screenshot_20240101-120000.png']
     check(screenshot['is_screenshot'] == 'yes',
@@ -1321,12 +1347,13 @@ def test_transfers_are_verified_and_a_short_write_keeps_the_original():
 # The window and the log file must describe the same run
 # ---------------------------------------------------------------------------
 
-def _run_capturing_the_window():
+def _run_capturing_the_window(dry_run=True, **kwargs):
     """Organize the scratch folder, keeping what the window would have shown."""
     import queue as q
     box = q.Queue()
-    core.organize_photos(make_settings(operation="move"), core.Progress(box),
-                         dry_run=True)
+    kwargs.setdefault("operation", "move")
+    stats, _plan = core.organize_photos(make_settings(**kwargs),
+                                        core.Progress(box), dry_run=dry_run)
     shown = []
     try:
         while True:
@@ -1336,7 +1363,7 @@ def _run_capturing_the_window():
     except q.Empty:
         pass
     log_path = sorted(SCRATCH.glob("archiveprep_log_*.txt"))[-1]
-    return shown, log_path.read_text(encoding="utf-8", errors="replace")
+    return shown, log_path.read_text(encoding="utf-8", errors="replace"), stats
 
 
 def test_the_window_and_the_log_file_use_the_same_words():
@@ -1353,7 +1380,7 @@ def test_the_window_and_the_log_file_use_the_same_words():
     but it may never say the same thing differently.
     """
     build_source()
-    shown, file_text = _run_capturing_the_window()
+    shown, file_text, _stats = _run_capturing_the_window()
     check(len(shown) > 10, f"the window was actually given lines (got {len(shown)})")
 
     # The window alone says these, and should: they are remarks about the
@@ -1373,6 +1400,104 @@ def test_the_window_and_the_log_file_use_the_same_words():
           f"file, so searching for them would fail: {missing[:4]}")
 
 
+# ---------------------------------------------------------------------------
+# The summary must report what was decided, not what was noticed
+# ---------------------------------------------------------------------------
+
+def _two_wrong_names():
+    """One name that breaks the file, one that costs nothing - plus a file
+    with nothing wrong with it, so the counts cannot come out right by luck."""
+    make_img(SCRATCH / "fine.jpg", model="SM-S918B", date="2023:05:10 14:30:00")
+    # breaking: a photo wearing a video's extension. Deliberately unlike
+    # fine.jpg, so it is not a duplicate as well.
+    make_img(SCRATCH / "IMG_0607.MOV", model="SM-S918B",
+             date="2023:05:11 09:00:00", color='green', fmt='JPEG')
+    # harmless: still an image either way, and opens everywhere
+    (SCRATCH / "web.png").write_bytes(b'RIFF' + struct.pack('<I', 100)
+                                      + b'WEBPVP8 ' + bytes(96))
+
+
+def test_the_summary_does_not_claim_repairs_it_was_told_not_to_make():
+    """A dry run with extension repair switched OFF reported
+
+        Wrongly-named files fixed: 804 -> renamed to the right extension
+        and moved to 'Wrong Extension'
+
+    and had not renamed one of them. The count came from what the scan saw;
+    the renaming it described is gated on a setting the user had turned off.
+    Nothing connected the two, so the summary borrowed the vocabulary of work
+    that never happened.
+    """
+    _two_wrong_names()
+    shown, file_text, stats = _run_capturing_the_window(
+        fix_ext=False, check_corrupt=True)
+    window = "\n".join(shown)
+
+    check(stats['misnamed'] == 2,
+          f"both wrong names are still found and reported "
+          f"(got {stats['misnamed']})")
+    check(stats['misnamed_fixed'] == 0,
+          f"...and none of them was repaired (got {stats['misnamed_fixed']})")
+
+    for where, text in (("window", window), ("log file", file_text)):
+        check("Files whose extension doesn't match their contents: 2" in text,
+              f"the {where} says how many were found, in the same words as "
+              f"the checkbox that controls them")
+        check("renamed to the right extension" not in text,
+              f"the {where} never claims a repair that was switched off")
+        check("that option is off" in text,
+              f"the {where} says why they were left alone")
+
+    check(not any(p.startswith("Wrong Extension/") for p in relpaths()),
+          f"and nothing was planned into Wrong Extension/ (got {relpaths()})")
+
+    # The severity split the Check Files report already makes. Two hundred
+    # wrong names with no way to tell which matter is not a useful number.
+    check("1 will not open at all, 1 open fine anyway" in window,
+          f"the summary says which of them actually matter (got: "
+          f"{[l for l in shown if 'Wrongly-named' in l]})")
+
+    # The header has to record the setting, or the log gives no way to check
+    # what was in force when it said that.
+    check("Fix wrong file extensions: No" in file_text,
+          "the run header records that extension repair was off")
+
+
+def test_a_preview_says_what_it_would_do_and_a_run_says_what_it_did():
+    """The summary was the last part of a dry run still written in the past
+    tense - under a header saying DRY RUN, above a log where every other line
+    says "would move to"."""
+    _two_wrong_names()
+    shown, _text, stats = _run_capturing_the_window(fix_ext=True,
+                                                    check_corrupt=True)
+    preview = "\n".join(shown)
+    check("2 would be renamed to the right extension" in preview,
+          f"a preview says it *would* rename them (got: "
+          f"{[l for l in shown if 'Wrongly-named' in l]})")
+    check("were renamed" not in preview,
+          "...and never says it already did")
+    check("Files that would be processed:" in preview,
+          f"the same goes for the file count (got: "
+          f"{[l for l in shown if 'processed' in l]})")
+
+    shown, file_text, stats = _run_capturing_the_window(dry_run=False,
+                                                        fix_ext=True,
+                                                        check_corrupt=True)
+    done = "\n".join(shown)
+    check("2 were renamed to the right extension" in done,
+          f"a real run says it did (got: "
+          f"{[l for l in shown if 'Wrongly-named' in l]})")
+    check("would be renamed" not in done, "...and does not hedge")
+    check("Fix wrong file extensions: Yes" in file_text,
+          "the header records that extension repair was on")
+
+    # The number reported is the number that moved, not the number noticed
+    moved = [p for p in relpaths() if p.startswith("Wrong Extension/")]
+    check(stats['misnamed_fixed'] == len(moved) == 2,
+          f"the count is what actually landed in Wrong Extension/ "
+          f"(said {stats['misnamed_fixed']}, found {moved})")
+
+
 def test_a_file_with_no_readable_date_goes_to_unknown_date():
     """The decision itself, on every platform.
 
@@ -1390,37 +1515,103 @@ def test_a_file_with_no_readable_date_goes_to_unknown_date():
         check(("Unknown Date" in folder) is expected,
               f"subfolder mode {mode!r} -> {folder}")
 
-    check(core.mtime_datetime(SCRATCH / "cam1.jpg") is not None,
-          "a file with an ordinary modified time still reports it")
 
+def test_a_perfectly_good_modified_time_is_not_a_capture_date():
+    """The file's timestamp used to be the last thing asked, and on anything
+    that arrived as a download it is the day it was extracted. One real
+    archive had 7,511 photos filed under five days in 2026 for that reason.
 
-def test_a_file_with_an_unreadable_date_is_filed_not_dropped():
-    """Windows raises OSError for a modified time outside the range it can
-    express, and a RAW is what reaches that fallback - it carries no date this
-    application reads. That used to escape as "[Errno 22] Invalid argument",
-    be caught by the generic handler, and the file was skipped entirely: not
-    organized, not in the manifest, one error line in a run of hundreds.
-
-    Unknown is an acceptable answer. Losing the file is not.
-
-    Only Windows refuses these timestamps; Linux and macOS read a negative
-    one as a date in 1716 and carry on, so there is nothing to exercise there.
+    So it is no longer asked at all. DSC09999.ARW here has an ordinary,
+    readable modified time of 2021-07-15 and no date anywhere else. It goes
+    to Unknown Date, not to 2021.
     """
-    import pytest
     build_source()
-    broken = SCRATCH / "DSC09999.ARW"
-    try:
-        os.utime(broken, (-8000000000, -8000000000))
-    except (OSError, OverflowError, ValueError):
-        pytest.skip("this filesystem will not store an out-of-range mtime")
-    if core.mtime_datetime(broken) is not None:
-        pytest.skip("this platform reads out-of-range timestamps quite happily")
+    raw = SCRATCH / "DSC09999.ARW"
+    check(raw.stat().st_mtime > 0, "the fixture really does have a timestamp")
 
     stats = run_app(dry_run=False, operation="move")
-    check(stats['errors'] == 0,
-          f"the unreadable date is no longer an error (got {stats['errors']})")
+    check(stats['errors'] == 0, f"no errors (got {stats['errors']})")
 
     landed = [p for p in relpaths() if p.endswith("DSC09999.ARW")]
     check(len(landed) == 1, f"the file was still filed somewhere (got {landed})")
     check("Unknown Date" in landed[0],
-          f"and it says the date is unknown rather than guessing: {landed[0]}")
+          f"an unknown date is said, not the timestamp's year: {landed[0]}")
+    check("2021" not in landed[0],
+          f"and the modified time's year is nowhere in the path: {landed[0]}")
+
+
+# ---------------------------------------------------------------------------
+# Dates read out of the filename
+# ---------------------------------------------------------------------------
+
+def test_a_camera_filename_supplies_the_date_when_nothing_else_can():
+    """Cameras stamp the capture time into the name, and for a file whose
+    metadata was stripped on the way through a cloud service that is the only
+    honest record left of when it was taken."""
+    for name, expected in (
+            ("IMG_20200904_144311.jpg", datetime(2020, 9, 4, 14, 43, 11)),
+            ("VID_20200904_144311.mp4", datetime(2020, 9, 4, 14, 43, 11)),
+            ("PXL_20251103_092233580.RAW-02.ORIGINAL.dng",
+             datetime(2025, 11, 3, 9, 22, 33)),
+            ("20240610_101512_iOS.jpg", datetime(2024, 6, 10, 10, 15, 12)),
+            ("Screenshot_20240301-142205.png", datetime(2024, 3, 1, 14, 22, 5)),
+            ("Screenshot_2024-03-01-14-22-05.png",
+             datetime(2024, 3, 1, 14, 22, 5)),
+            ("Screen Shot 2024-03-01 at 14.22.05.png",
+             datetime(2024, 3, 1, 14, 22, 5)),
+    ):
+        check(core.date_from_filename(Path(name)) == expected,
+              f"{name} -> {core.date_from_filename(Path(name))}, "
+              f"expected {expected}")
+
+
+def test_a_date_shaped_name_that_is_not_a_date_is_refused():
+    """The reason the patterns are anchored and require a time of day.
+
+    "Facetune_03-03-2019-21-05-08" is DD-MM-YYYY, and 30 of them turned up in
+    one real archive. A pattern allowed to float through a name would read
+    that as a different month and a different day and be confident about it.
+    A wrong date disappears into an archive; Unknown Date does not.
+    """
+    for name in ("Facetune_03-03-2019-21-05-08.jpg",   # DD-MM-YYYY
+                 "IMG-20230510-WA0001.jpg",            # app scheme, not a camera
+                 "IMG_20201332_000000.jpg",            # month 13
+                 "IMG_20200230_120000.jpg",            # 30th of February
+                 "IMG_20991231_120000.jpg",            # not taken in the future
+                 "IMG_19700101_120000.jpg",            # before digital cameras
+                 "IMG_20200904.jpg",                   # a date with no time
+                 "holiday_20200904_144311.jpg",        # not anchored
+                 "DSC00001.JPG"):                      # no date at all
+        check(core.date_from_filename(Path(name)) is None,
+              f"{name} must not be read as a date "
+              f"(got {core.date_from_filename(Path(name))})")
+
+
+def test_real_metadata_still_beats_the_filename():
+    """The name is the last rung of the ladder, not a shortcut past it. A
+    photo whose EXIF and whose filename disagree is filed by its EXIF."""
+    make_img(SCRATCH / "IMG_20200904_144311.jpg", model="SM-S918B",
+             date="2023:05:10 14:30:00")
+    run_app(dry_run=False, operation="move")
+    landed = [p for p in relpaths() if p.endswith("IMG_20200904_144311.jpg")]
+    check(len(landed) == 1, f"filed somewhere (got {landed})")
+    folder = landed[0].rsplit("/", 1)[0]        # the name itself says 2020
+    check("2023" in folder and "2020" not in folder,
+          f"EXIF (2023) wins over the name (2020): {landed[0]}")
+
+
+def test_the_run_says_where_the_dates_came_from():
+    """Thousands of files quietly changing folder is not something to find out
+    by browsing afterwards."""
+    build_source()
+    shown, file_text, stats = _run_capturing_the_window()
+    check(stats['dated_by_filename'] == 1,
+          f"the screenshot took its date from its name "
+          f"(got {stats['dated_by_filename']})")
+    check(stats['no_date'] > 0,
+          f"and some files had no date at all (got {stats['no_date']})")
+    for where, text in (("window", "\n".join(shown)), ("log file", file_text)):
+        check("Dated from their filename: 1" in text,
+              f"the {where} says how many took a date from their name")
+        check("'Unknown Date'" in text,
+              f"the {where} says where the dateless ones went")
