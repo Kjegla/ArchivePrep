@@ -44,9 +44,10 @@ Every capability traces to a real archival problem:
    contained corrupted files
 4. **Handling real-world export formats**, Google Takeout above all
 
-Extension-mismatch detection is *not* one of them. It exists only because the
-application already reads file headers, and is kept as an optional maintenance
-feature. It does not drive architecture or roadmap decisions.
+Extension-mismatch *repair* was not one of them, and has been removed. Reading
+file headers stays, because problem 4 depends on it - Takeout files with the
+extension chopped off are invisible otherwise - but nothing is renamed, and
+nothing is filed differently, on the strength of what it finds.
 
 ## Honest answers over confident guesses
 
@@ -78,7 +79,7 @@ Four tiers are done. Every one ended with the full suite green.
 | **3 Structure** | Core split from the window; one record per file; deciding split from doing; per-run manifest; CI runs the tests |
 | **4 Understanding** | One place that identifies a file; Takeout sidecar dates; captures; embedded motion clips |
 
-**113 tests, 467 checks.** 106 of them need no screen at all.
+**113 tests, 451 checks.** 105 of them need no screen at all.
 
 ```bash
 pip3 install -r requirements-dev.txt
@@ -100,18 +101,26 @@ than by a decision. Files from one shutter press share a date; a RAW with no
 capture siblings inherits nothing and stays honestly unidentified instead of
 being assumed into the folder of the others.
 
-**3. Harmless versus breaking extension mismatches.** The distinction now
-exists and is reported: a WEBP called `.png` opens everywhere (`harmless`), a
-photo called `.MOV` is handed to a video player and fails (`breaking`), and so
-is a Takeout file whose extension was truncated away. **What is done about
-them has not changed** - both still go to `Wrong Extension/`. The information
-comes first; changing the behaviour is a separate decision.
+**3 and 4, both about extension mismatches.** Answered by deleting the
+question. Extension repair is gone entirely - `Wrong Extension/`, the
+checkbox, the rename undo journal, the harmless/breaking split and the
+`misnamed` verdict with it.
 
-**4. Unknown-extension sniffing was tied to extension fixing.** Resolved by
-removing the coupling. Turning off "fix wrong extensions" used to *hide* those
-files completely - never sorted, never checked, never deduplicated. Finding a
-file and deciding what to do with it are different questions, and only the
-second is the user's to answer.
+It solved none of the four problems above. It existed because the application
+already reads file headers while solving the real ones, and it had grown a
+second undo system for the least important thing here. Measured on a real
+86,791-file collection: 804 files whose name disagreed with their contents,
+**none of which failed to open and none of which were damaged**.
+
+What stays is content sniffing, which is load-bearing for problem 4 - Takeout
+files with no extension are invisible without it - and the health check now
+verifies a file as what it *is* rather than as what it is called. Nothing is
+renamed on the strength of either. The name a camera or an export gave a file
+is the source's business.
+
+**Removing it also fixed something.** `misnamed` returned early, so the files
+whose names could not be trusted were the exact files that never got
+health-checked at all - 804 of them in that collection. They are checked now.
 
 ## What changed that you would notice
 

@@ -60,8 +60,9 @@ the same size, so anything with a unique size is never read at all.
 contained corrupted files. Spots half-copied and truncated photos and videos,
 and is careful about what it does *not* call damage - motion photos, iPhone
 Portrait shots and zero-padded recoveries all have data after the image and are
-all perfectly fine. Formats that cannot be verified are reported honestly as
-*"couldn't be checked"* rather than guessed at.
+all perfectly fine. Three answers, and only three: **healthy**, **damaged**, or
+**unknown** for formats it cannot verify — said honestly rather than guessed
+at, because the question is only ever "would I trust this in my archive?"
 
 **Handling real-world exports.** Google Takeout truncates long filenames,
 sometimes chopping the extension clean off. Those files are found by reading
@@ -114,8 +115,8 @@ is worth more than one where things were guessed into place.
   an interrupted run is still fully reversible.
 - Every transfer is verified: a move only removes the original once the copy is
   confirmed complete.
-- Nothing is ever deleted. Duplicates, damaged files and misnamed ones are set
-  aside in folders mirroring where they came from.
+- Nothing is ever deleted, and nothing is ever renamed. Duplicates and damaged
+  files are set aside in folders mirroring where they came from.
 
 ## What a run leaves behind
 
@@ -133,12 +134,12 @@ file?" is answered without opening the `.txt`. It keeps counting while a run is
 still printing, and it does not scroll the log out from under you while it
 does. `Ctrl+F` jumps to it, `Enter` and `Shift+Enter` step, `Esc` clears it.
 
-**The summary reports what the run decided, not what it noticed.** A preview
-says what it *would* do; a real run says what it did. A count of files that
-look wrongly named is never reported as a count of files repaired — if the
-repair is switched off, the summary says so and says how many of those names
-actually stop a file opening. The run header records every setting that was
-in force, so the log can always be checked against what was asked for.
+**The summary reports what the run decided, not what it noticed** — and only
+what changed, so a run with no duplicates does not tell you so. A preview says
+what it *would* do; a real run says what it did. The run header records every
+setting that was in force, so the log can always be checked against what was
+asked for. Preview then Execute leaves behind exactly what a fresh Execute
+does, manifest included.
 
 **The window and the run log say the same words.** A line read in the `.txt`
 can be pasted into Find and located in the window, and the reverse. They are
@@ -146,17 +147,24 @@ written from one string rather than two, so they cannot drift apart again. The
 only things the window says alone are remarks about the files a run produced -
 it would be circular for a log to announce its own name inside itself.
 
+## Your filenames are yours
+
+**ArchivePrep never renames a file.** These are camera and cloud exports; the
+name is the source's business, and a tool that quietly second-guesses it is a
+tool you have to supervise.
+
+It does read the first bytes of every file, for two reasons that earn it.
+Google Takeout truncates long filenames and sometimes chops the extension
+clean off — without reading the contents, those files would be invisible to
+this application entirely. And a file is health-checked as what it **is**: a
+photo that arrived named `.dng` is verified as a photo, rather than handed to
+a video structure check that would report nonsense about it.
+
+Neither of those renames anything, moves anything, or files anything
+differently.
+
 ## Maintenance extras
 
-Some things the application can do because it is already reading file headers,
-kept because they are useful - not because they are what it is for:
-
-- **Wrong file extensions** — *off by default.* A JPEG saved as `.MOV` will not
-  open at all, because your computer hands it to a video player. A WEBP saved
-  as `.png` opens everywhere and is harmless. Both are reported, and the
-  reports say which is which. Switch it on and files are renamed to the
-  extension they should have had and set aside in `Wrong Extension\`, with
-  their own undo.
 - **Empty folder cleanup** after a move. Only genuinely empty folders — a
   folder holding so much as a stray `Thumbs.db` is left alone, because a folder
   with a file in it is not empty and this application does not decide which of
@@ -236,7 +244,7 @@ pip3 install -r requirements-dev.txt
 python -m pytest tests/ -q
 ```
 
-113 tests, 467 checks. They build real photos and videos in a temporary folder
+113 tests, 451 checks. They build real photos and videos in a temporary folder
 and run the real code against them, so a passing run means the real thing
 works - not a simplified copy of it. Every test starts from a clean folder, so
 you can run just the one you care about:
