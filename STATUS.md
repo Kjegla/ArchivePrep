@@ -79,7 +79,7 @@ Four tiers are done. Every one ended with the full suite green.
 | **3 Structure** | Core split from the window; one record per file; deciding split from doing; per-run manifest; CI runs the tests |
 | **4 Understanding** | One place that identifies a file; Takeout sidecar dates; captures; embedded motion clips |
 
-**113 tests, 451 checks.** 105 of them need no screen at all.
+**117 tests, 455 checks.** 109 of them need no screen at all.
 
 ```bash
 pip3 install -r requirements-dev.txt
