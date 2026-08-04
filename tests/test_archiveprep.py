@@ -341,7 +341,7 @@ def test_a_replayed_preview_leaves_behind_what_a_fresh_run_does():
         encoding='utf-8')
     check("Operation: move" in log and "Subfolder mode:" in log,
           f"the log header says what the run was asked to do (got {log[:200]!r})")
-    check("SUMMARY:" in log and "Total media files:" in log,
+    check("SUMMARY:" in log and "Files scanned:" in log,
           "and it ends with the same summary a fresh run writes")
 
 
@@ -1396,7 +1396,7 @@ def test_a_preview_says_what_it_would_do_and_a_run_says_what_it_did():
     check("would go to 'Corrupt'" in preview,
           f"a preview says where the damaged file *would* go (got: "
           f"{[l for l in shown if 'Damaged' in l]})")
-    check("Files that would be processed:" in preview,
+    check("Files that would be organized:" in preview,
           f"the same goes for the file count (got: "
           f"{[l for l in shown if 'processed' in l]})")
     check("moved to 'Corrupt'" not in preview,

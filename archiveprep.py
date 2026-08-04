@@ -108,15 +108,9 @@ class ArchivePrepGUI:
         self.root.minsize(920, 720)
         main_frame.columnconfigure(1, weight=1)
 
-        # Title
-        title_frame = ttk.Frame(main_frame)
-        title_frame.grid(row=0, column=0, columnspan=3, pady=(0, 10), sticky=(tk.W, tk.E))
-
-        ttk.Label(title_frame, text="ArchivePrep",
-                  font=('Segoe UI', 16, 'bold')).pack(side=tk.LEFT, expand=True)
-
-        # Source folder selection
-        ttk.Label(main_frame, text="Source Folder:").grid(
+        # The window's own title bar already says ArchivePrep; repeating it
+        # in 16pt bold underneath was decoration.
+        ttk.Label(main_frame, text="Source folder").grid(
             row=1, column=0, sticky=tk.W, padx=5, pady=5)
 
         folder_entry = ttk.Entry(main_frame, textvariable=self.source_folder)
@@ -173,7 +167,7 @@ class ArchivePrepGUI:
 
         self.screenshot_checkbox = ttk.Checkbutton(
             extras_frame,
-            text="Separate Android screenshots",
+            text="Separate screenshots",
             variable=self.separate_screenshots)
         self.screenshot_checkbox.pack(anchor=tk.W, pady=3)
 
@@ -182,12 +176,6 @@ class ArchivePrepGUI:
             text="Include subfolders (scan recursively)",
             variable=self.include_subfolders)
         self.subfolders_checkbox.pack(anchor=tk.W, pady=3)
-
-        self.multithread_checkbox = ttk.Checkbutton(
-            extras_frame,
-            text=f"Multithreaded scanning ({self.max_threads} threads)",
-            variable=self.use_multithreading)
-        self.multithread_checkbox.pack(anchor=tk.W, pady=3)
 
         video_note = ttk.Label(
             extras_frame,
@@ -214,9 +202,9 @@ class ArchivePrepGUI:
 
         self.thorough_checkbox = ttk.Checkbutton(
             safety_frame,
-            text="       └ Thorough check (much slower)",
+            text="Thorough check (much slower)",
             variable=self.corrupt_thorough)
-        self.thorough_checkbox.pack(anchor=tk.W, pady=(0, 3))
+        self.thorough_checkbox.pack(anchor=tk.W, padx=(20, 0), pady=(0, 3))
 
         self.cleanup_checkbox = ttk.Checkbutton(
             safety_frame,
@@ -539,8 +527,8 @@ class ArchivePrepGUI:
                 self._dropped_lines += dropped - (1 if self._dropped_lines else 0)
                 self.output_text.insert(
                     '1.0',
-                    f"[trimmed] {self._dropped_lines} earlier line(s) are not "
-                    f"shown here - the run log on disk has all of them.\n")
+                    f"({self._dropped_lines} earlier line(s) are not "
+                    f"shown here - the run log on disk has all of them)\n")
             # Following the tail is only helpful while nobody is reading. A
             # search means someone is: scrolling to the end here would drag
             # the view off the match they just found, 100ms after they found
@@ -655,7 +643,7 @@ class ArchivePrepGUI:
             try:
                 work(self.progress)
             except Exception as e:
-                self.log(f"\n[error] unexpected:  {e}")
+                self.log(f"\nERROR unexpected: {e}")
             finally:
                 self.processing = False
                 self.queue.put(("enable_buttons", None, None))
@@ -701,19 +689,16 @@ class ArchivePrepGUI:
                        self.cached_plan['key'] == core.plan_key(self._snapshot_settings()))
         cache_note = ("\n\nYour preview will be reused - no re-scan needed "
                       "(unless the folder changed since then)." if cache_ready else "")
+        # The settings are already listed at the top of the log, and were on
+        # screen when you ticked them. What this dialog is for is the one
+        # thing you cannot undo by closing it: whether your originals move.
+        consequence = ("Your files will be MOVED out of the source folder."
+                       if operation == "move" else
+                       "Your originals stay where they are; copies are made.")
         result = messagebox.askyesno(
-            "Confirm Operation",
-            f"Are you sure you want to {operation} files?\n\n"
-            f"Source: {self.source_folder.get()}\n"
-            f"Operation: {operation.upper()}\n"
-            f"Subfolder organization: {self.subfolder_mode.get()}\n"
-            f"Separate RAW files: {'Yes' if self.separate_raw.get() else 'No'}\n"
-            f"Separate Screenshots: {'Yes' if self.separate_screenshots.get() else 'No'}\n"
-            f"Include subfolders: {'Yes' if self.include_subfolders.get() else 'No'}\n"
-            f"Find duplicates by content: {'Yes' if self.dedupe_content.get() else 'No'}\n"
-            f"Check files for damage: {'Yes' if self.check_corrupt.get() else 'No'}\n"
-            f"Delete empty folders: {'Yes' if self.cleanup_empty.get() else 'No'}\n\n"
-            f"{'Files will be MOVED from source!' if operation == 'move' else 'Original files will remain untouched.'}"
+            f"{operation.capitalize()} files?",
+            f"{consequence}\n\n{self.source_folder.get()}\n\n"
+            f"Everything this does can be reversed with Undo Last Run."
             f"{cache_note}")
 
         if not result:
