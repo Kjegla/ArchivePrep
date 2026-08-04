@@ -24,6 +24,7 @@ secretly depend on each other.
 
 The byte-level verdicts of file_health() live in test_golden_corpus.py.
 """
+import csv
 import json
 import os
 import shutil
@@ -305,6 +306,43 @@ def test_cached_preview_replay():
     check(top_media == [], "replay: source top level emptied (move)")
     check(len(list(SCRATCH.glob("archiveprep_undo_*.jsonl"))) == 1,
           "replay wrote an undo record")
+
+
+def test_a_replayed_preview_leaves_behind_what_a_fresh_run_does():
+    """Preview, then Execute, is the workflow the README tells you to use -
+    and it was the one that produced the least.
+
+    The replay wrote no manifest at all, a differently-worded log header and a
+    two-line summary, so the file the README calls the run's real deliverable
+    was silently skipped on the recommended path. Whatever else the cache
+    saves, it may not quietly hand back less.
+    """
+    build_source()
+    settings = make_settings(operation="move")
+    _stats, plan = core.organize_photos(settings, core.Progress(), dry_run=True)
+    for artifact in SCRATCH.glob("archiveprep_*"):
+        artifact.unlink()                       # keep only what the replay makes
+
+    stats = core.execute_cached_plan(plan, settings, core.Progress())
+    check(stats is not None, "the replay ran")
+
+    manifests = list(SCRATCH.glob("archiveprep_manifest_*.csv"))
+    check(len(manifests) == 1,
+          f"a replay writes a manifest, like a fresh run does "
+          f"(got {[m.name for m in manifests]})")
+    rows = list(csv.DictReader(
+        manifests[0].read_text(encoding='utf-8').splitlines()))
+    check(len(rows) == TOTAL,
+          f"one row per file scanned (got {len(rows)})")
+    check(all(r['target_path'] for r in rows if r['action'] == 'organize'),
+          "and every organized file records where it went")
+
+    log = list(SCRATCH.glob("archiveprep_log_*.txt"))[0].read_text(
+        encoding='utf-8')
+    check("Operation: move" in log and "Subfolder mode:" in log,
+          f"the log header says what the run was asked to do (got {log[:200]!r})")
+    check("SUMMARY:" in log and "Total media files:" in log,
+          "and it ends with the same summary a fresh run writes")
 
 
 def test_cache_invalidation():

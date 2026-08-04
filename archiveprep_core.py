@@ -1877,6 +1877,29 @@ def _write_run_summary(progress, log_file, stats, duration, dry_run):
             f"{stats['screenshots']} files")
 
 
+def _run_header(settings, dry_run):
+    """What this run was asked to do, as the lines both the window and the log
+    file get. Built once here so a fresh run and a replayed preview cannot
+    describe the same settings differently."""
+    operation = settings.operation
+    yes_no = lambda flag: 'Yes' if flag else 'No'          # noqa: E731
+    return [
+        f"ArchivePrep - {'DRY RUN' if dry_run else operation.upper()}",
+        f"Source: {Path(settings.source)}",
+        f"Operation: {operation}",
+        f"Subfolder mode: {settings.subfolder_mode}",
+        f"Separate RAW files: {yes_no(settings.separate_raw)}",
+        f"Separate Screenshots: {yes_no(settings.separate_screenshots)}",
+        f"Include subfolders: {yes_no(settings.include_subfolders)}",
+        f"Multithreading: {yes_no(settings.use_multithreading)}",
+        f"Find duplicates by content: {yes_no(settings.dedupe_content)}",
+        "Check files for damage: "
+        + (('Yes (thorough)' if settings.corrupt_thorough else 'Yes')
+           if settings.check_corrupt else 'No'),
+        f"Delete empty folders: {yes_no(settings.cleanup_empty)}",
+    ]
+
+
 def organize_photos(settings, progress, dry_run=True):
     """SCAN what is there, DECIDE what should happen, then APPLY it.
 
@@ -1896,26 +1919,9 @@ def organize_photos(settings, progress, dry_run=True):
     operation = settings.operation
     operation_text = "Moving" if operation == "move" else "Copying"
 
-    # Built once and shown twice. The window gets it now, because the settings
-    # are worth seeing before a long scan starts; the log file gets the same
-    # lines further down, once it exists. Writing it out twice by hand is how
-    # the two came to disagree about what a run was.
-    yes_no = lambda flag: 'Yes' if flag else 'No'          # noqa: E731
-    header = [
-        f"ArchivePrep - {'DRY RUN' if dry_run else operation_text.upper()}",
-        f"Source: {source_path}",
-        f"Operation: {operation}",
-        f"Subfolder mode: {settings.subfolder_mode}",
-        f"Separate RAW files: {yes_no(settings.separate_raw)}",
-        f"Separate Screenshots: {yes_no(settings.separate_screenshots)}",
-        f"Include subfolders: {yes_no(settings.include_subfolders)}",
-        f"Multithreading: {yes_no(settings.use_multithreading)}",
-        f"Find duplicates by content: {yes_no(settings.dedupe_content)}",
-        "Check files for damage: "
-        + (('Yes (thorough)' if settings.corrupt_thorough else 'Yes')
-           if settings.check_corrupt else 'No'),
-        f"Delete empty folders: {yes_no(settings.cleanup_empty)}",
-    ]
+    # Shown to the window now, because the settings are worth seeing before a
+    # long scan starts; written into the log file further down, once it exists.
+    header = _run_header(settings, dry_run)
     progress.log("=" * 60)
     for line in header:
         progress.log(line)
@@ -2102,6 +2108,11 @@ def organize_photos(settings, progress, dry_run=True):
                 'fingerprint': fingerprint,
                 'ops': ctx.ops,
                 'stats': copy.deepcopy(stats),
+                # Carried so a replay can write the same manifest a fresh run
+                # writes. It is a reference to records that already exist, not
+                # a copy - the cost is keeping the scan's memory alive between
+                # Preview and Execute, which is the point of caching at all.
+                'records': records,
             }
             progress.log("Preview cached - Execute will reuse it "
                          "without re-scanning (as long as nothing changes).")
@@ -2730,7 +2741,13 @@ def execute_cached_plan(plan, settings, progress):
     This is deliberately thin. It used to be a second execution engine, with
     its own collision handling that had already diverged from the real one;
     now it verifies the folder and hands the same operations to the same
-    applier.
+    applier, under the same header, and finishes with the same summary and
+    the same manifest.
+
+    That last part was missing. A replay wrote no manifest at all, so the
+    documented workflow - Preview, read it, Execute - was the one that
+    produced the *least*, and the file the README calls the run's real
+    deliverable was the thing it silently skipped.
     """
     source_path = Path(settings.source)
     start_time = datetime.now()
@@ -2748,8 +2765,8 @@ def execute_cached_plan(plan, settings, progress):
         return None
 
     ops = plan['ops']
+    records = plan['records']
     operation = settings.operation
-    operation_text = "Moving" if operation == "move" else "Copying"
 
     # Start from the preview's statistics; redo the live counters
     stats = copy.deepcopy(plan['stats'])
@@ -2760,23 +2777,26 @@ def execute_cached_plan(plan, settings, progress):
     log_filename = f"archiveprep_log_{run_stamp}.txt"
     undo_path = source_path / f"archiveprep_undo_{run_stamp}.jsonl"
 
+    header = _run_header(settings, dry_run=False)
     progress.log("=" * 60)
-    progress.log(f"ArchivePrep - {operation_text.upper()} "
-                 f"(cached preview)")
-    progress.log(f"Source: {source_path}")
-    progress.log(f"Folder unchanged since preview - executing "
-                 f"{len(ops)} planned operation(s) directly")
+    for line in header:
+        progress.log(line)
+    progress.log(f"Reusing the preview - {len(ops)} operation(s), "
+                 f"nothing rescanned")
     progress.log("=" * 60)
 
     with open(source_path / log_filename, 'w', encoding='utf-8') as log_file:
         log_file.write(f"ArchivePrep run log - {datetime.now()}\n")
-        log_file.write(f"Source Folder: {source_path}\n")
-        log_file.write(f"Mode: {operation.upper()} (cached preview replay)\n")
+        for line in header:
+            log_file.write(line + "\n")
+        log_file.write(f"Reusing the preview - {len(ops)} operation(s), "
+                       f"nothing rescanned\n")
         log_file.write("=" * 60 + "\n\n")
 
         _journal_start(undo_path, operation, source_path)
         undo_entries, failures = _apply_plan(
-            ops, source_path, progress, stats, log_file, undo_path, p0=0, p1=100)
+            ops, source_path, progress, stats, log_file, undo_path,
+            records=records, p0=0, p1=100)
         _report_failures(failures, source_path, progress, log_file)
 
         if undo_entries:
@@ -2793,24 +2813,19 @@ def execute_cached_plan(plan, settings, progress):
 
         duration = (datetime.now() - start_time).total_seconds()
         stats['duration_seconds'] = duration
-
-        progress.log("\n" + "=" * 60)
-        progress.log("SUMMARY:")
-        progress.log(f"Files processed: {stats['processed']}")
-        progress.log(f"Errors: {stats['errors']}")
-        progress.log(f"Duration: {duration:.1f} seconds "
-                     f"(analysis skipped - cached preview)")
-        log_file.write(f"\nSUMMARY: processed {stats['processed']}, "
-                       f"errors {stats['errors']}, {duration:.1f}s\n")
+        _write_run_summary(progress, log_file, stats, duration, dry_run=False)
         progress.log(f"\nLog file saved: {log_filename}")
-        progress.log(f"\nOperation complete! Files were {operation}d "
-                     f"successfully.")
-        if undo_entries:
-            progress.log("This run can be undone with the 'Undo Last Run' "
-                         "button.")
-        progress.status(f"Operation complete - {stats['processed']} files "
-                        f"{operation}d")
 
+    manifest_name = f"archiveprep_manifest_{run_stamp}.csv"
+    write_manifest(source_path / manifest_name, records, source_path)
+    progress.log(f"Manifest saved: {manifest_name}")
+
+    progress.log(f"\nOperation complete! Files were {operation}d "
+                 f"successfully.")
+    if undo_entries:
+        progress.log("This run can be undone with the 'Undo Last Run' button.")
+    progress.status(f"Operation complete - {stats['processed']} files "
+                    f"{operation}d")
     return stats
 
 
@@ -2924,6 +2939,8 @@ def run_health_check(settings, progress):
                     f"{len(damaged)} damaged")
 
     return stats
+
+
 def run_undo(undo_file, record, progress, label=None):
     """Worker: revert every operation in the undo record."""
     entries = record.get('entries', [])
