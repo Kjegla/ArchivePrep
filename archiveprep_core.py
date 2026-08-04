@@ -931,6 +931,21 @@ def file_health(file_path, thorough=False, probe=None):
     # A caller that has already read the header passes it in rather than
     # making us read it again.
     real_format, _valid_exts, canonical = probe or probe_file(file_path)
+
+    # The magic bytes stop short here, and the honest answer is to stop with
+    # them. A DNG, a CR2 and an ordinary TIFF all begin II*\0, so "TIFF or RAW
+    # image" is as far as sniffing gets - and a RAW is exactly what cannot be
+    # verified without decoding it.
+    #
+    # Checking one anyway is worse than not checking it. Pillow opens the
+    # container and its embedded thumbnail perfectly happily, and there is no
+    # end marker for the format, so nothing looks at the rest of the file: a
+    # 64 MB DNG cut down to 6 MB was reported as healthy. A confident wrong
+    # answer about whether a photo survived is the one thing this check must
+    # never give. That is what 'unknown' is for.
+    if real_format == 'TIFF or RAW image':
+        return 'unknown', "RAW or TIFF - cannot be verified without decoding it"
+
     suffix = (canonical or file_path.suffix).lower()
 
     if suffix in MVHD_CAPABLE_EXTS:

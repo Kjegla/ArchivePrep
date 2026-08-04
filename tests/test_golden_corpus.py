@@ -121,6 +121,28 @@ def _raw(d):
     return p
 
 
+def _tiff_based_raw(d):
+    """A RAW that really does start with TIFF magic, the way a DNG, CR2, NEF
+    or ARW off a camera does - not the made-up bytes above.
+
+    The distinction matters and was found the hard way. The fake fixture is
+    unrecognisable, so it falls through on its extension and is reported
+    unknown. A real one is *identified* as "TIFF or RAW image", and if that
+    licenses an image check, Pillow opens the container quite happily and a
+    64 MB file cut down to 6 MB comes back healthy.
+    """
+    p = d / "IMG_2593.DNG"
+    header = b'II*\x00' + struct.pack('<I', 8)
+    p.write_bytes(header + bytes(64) + b'\xff\xd8\xff' + bytes(200_000))
+    return p
+
+
+def _truncated_tiff_based_raw(d):
+    p = d / "IMG_2594.DNG"
+    p.write_bytes(_tiff_based_raw(d).read_bytes()[:5_000])
+    return p
+
+
 def _avi(d):
     p = d / "clip.avi"
     p.write_bytes(b"fake avi" * 100)
@@ -260,6 +282,15 @@ GOLDEN = [
     ("RAW", _raw, 'unknown',
      "cannot be verified without decoding it; reported honestly so a good "
      "file is never wrongly accused"),
+    ("RAW with real TIFF magic", _tiff_based_raw, 'unknown',
+     "the one above is unrecognisable and falls through on its extension; a "
+     "real DNG/CR2/NEF is IDENTIFIED as 'TIFF or RAW image', and identifying "
+     "it must not license an image check it cannot actually pass"),
+    ("RAW with real TIFF magic, truncated", _truncated_tiff_based_raw, 'unknown',
+     "the case that caught this: cut to a fraction of its size it was "
+     "reported HEALTHY, because Pillow opens the container and its thumbnail "
+     "and TIFF has no end marker to check. Unknown is the honest answer - "
+     "never healthy, and never damaged either, since we did not look"),
     ("AVI", _avi, 'unknown',
      "same, for the video formats with no cheap structural check"),
 
