@@ -1,6 +1,6 @@
 # ArchivePrep - v4 status
 
-**v4.5 is the current release** and supersedes [v34](../../releases), which
+**v4.6 is the current release** and supersedes [v34](../../releases), which
 shipped under the project's former name, Kjegla's Photo Organizer.
 
 The number goes down while the software goes forward: v22 through v35 were
