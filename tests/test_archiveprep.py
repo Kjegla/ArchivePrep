@@ -337,8 +337,7 @@ def test_settings_invalidate_cached_preview():
     for name, changed in [("dedupe_content", {"dedupe": True}),
                           ("check_corrupt", {"check_corrupt": True}),
                           ("corrupt_thorough", {"thorough": True}),
-                          ("cleanup_empty", {"cleanup_empty": False}),
-                          ("fix_extensions", {"fix_ext": False})]:
+                          ("cleanup_empty", {"cleanup_empty": False})]:
         check(base_key != core.plan_key(make_settings(operation="move", **changed)),
               f"toggling {name} invalidates the cached preview")
     check(base_key == core.plan_key(make_settings(operation="move")),
@@ -477,65 +476,59 @@ def test_damaged_files_routed_to_corrupt():
     check(not (SCRATCH / "a").exists(), "emptied folder 'a' swept away")
 
 
-def test_misnamed_files_and_undo_renames():
-    """Misnamed files go to Wrong Extension (not Corrupt), get their own undo
-    record, survive a re-run, and 'Undo Renames' reverses only them."""
-    # 1. A misnamed file and a genuinely broken one must part company
+def test_a_name_that_disagrees_with_its_contents_is_left_alone():
+    """The application does not rename your files, and does not set them
+    aside for being named oddly.
+
+    It used to: a file whose header disagreed with its extension was renamed
+    to the extension it "should" have had and moved to Wrong Extension/, with
+    a second undo journal of its own. That solved none of the problems this
+    exists for - it existed only because the application already reads file
+    headers while solving the real ones. These are camera and cloud exports;
+    the name is the source's business.
+
+    What survives is the part that earns its place: the file is still
+    identified by its contents, and still health-checked as what it really
+    is, so a wrong name hides nothing.
+    """
     (SCRATCH / "vids").mkdir()
     make_img(SCRATCH / "real.jpg", model="SM-S918B", date="2023:05:10 14:30:00")
-    # a photo that got saved with a video extension - intact, just misnamed.
-    # Deliberately different content from real.jpg, so it is not also a duplicate.
+    # A photo saved with a video extension - intact, just oddly named.
+    # Deliberately different content from real.jpg, so it is not a duplicate.
     make_img(SCRATCH / "vids" / "IMG_0607.MOV", model="SM-S918B",
              date="2023:05:11 09:00:00", color='green', fmt='JPEG')
     (SCRATCH / "vids" / "broken.jpg").write_bytes(b"")
+
     stats = run_app(dry_run=False, operation="move", include_subfolders=True,
                     dedupe=True, check_corrupt=True)
     files = relpaths()
-    check(stats['misnamed'] == 1, f"1 misnamed file found (got {stats['misnamed']})")
+
+    check(not (SCRATCH / "Wrong Extension").exists(),
+          f"no Wrong Extension folder is created any more (got {files})")
+    check(not any("IMG_0607.jpg" in f for f in files),
+          f"and nothing was renamed (got {files})")
+    check(any(f.endswith("IMG_0607.MOV") for f in files),
+          f"the file keeps the name its source gave it (got {files})")
+
     check(stats['damaged'] == 1,
           f"the empty file is still damaged (got {stats['damaged']})")
-    check("Wrong Extension/vids/IMG_0607.jpg" in files,
-          f"misnamed file renamed to .jpg and moved to Wrong Extension, "
-          f"mirroring its folder (got {files})")
     check("Corrupt/vids/broken.jpg" in files,
-          "the genuinely broken file went to Corrupt")
+          "the genuinely broken file still goes to Corrupt")
     check(not any(f.startswith("Corrupt/vids/IMG_0607") for f in files),
-          "the misnamed file was NOT called damaged")
+          "and the oddly-named one was not called damaged")
 
-    # 2. The renames get their own undo record, inside the folder they affect
-    rename_records = list((SCRATCH / "Wrong Extension")
-                          .glob("archiveprep_undo_renames_*.jsonl"))
-    check(len(rename_records) == 1,
-          f"a separate rename undo record was written inside Wrong Extension/ "
-          f"(got {len(rename_records)})")
-    rec = core.read_undo(rename_records[0])
-    check(len(rec['entries']) == 1, "the rename record covers the 1 rename")
-    check(rec['entries'][0][1].endswith("IMG_0607.MOV"),
-          "...and remembers the original name")
-
-    # 3. A second run leaves the set-aside folder alone
-    before_misnamed = relpaths()
-    run_app(dry_run=False, operation="move", include_subfolders=True,
-            dedupe=True, check_corrupt=True)
-    check(relpaths() == before_misnamed, "re-run leaves Wrong Extension/ alone")
-
-    # 4. Undo Renames reverses the renames and nothing else
-    run_undo(rename_records[0], rec, label="renames")
-    files = relpaths()
-    check("vids/IMG_0607.MOV" in files,
-          f"the renamed file is back under its original name (got {files})")
-    check("Samsung Galaxy S23 Ultra/2023/05-May/real.jpg" in files,
-          "the rest of the run was left untouched")
-    check("Corrupt/vids/broken.jpg" in files,
-          "the damaged file stayed in Corrupt - only renames were undone")
-    check(len(list((SCRATCH / "Wrong Extension").glob("*.undone"))) == 1,
-          "the rename record was marked used so it cannot run twice")
+    check(not list(SCRATCH.rglob("archiveprep_undo_renames_*")),
+          "no second undo journal is written")
 
 
 def test_unrecognised_extensions_found_by_content_then_rerun():
     """Google Takeout truncates long names, chopping the extension clean off.
-    Those files are found by their contents - and a second run then leaves the
-    set-aside folders alone."""
+
+    This is the reason content sniffing exists and the reason it stays: with
+    no usable extension these files are invisible to everything, including
+    this application, until their first bytes are read. Finding them is the
+    whole job. Renaming them was never part of it.
+    """
     # 1. Files with no usable extension are still seen
     make_img(SCRATCH / "normal.jpg", model="SM-S918B", date="2023:05:10 14:30:00")
     make_img(SCRATCH / "PXL_20250507_050944066.RAW-01.MP.COVER", model="SM-S918B",
@@ -553,21 +546,20 @@ def test_unrecognised_extensions_found_by_content_then_rerun():
     check("notes.txt" not in found, "a text file is still ignored")
     check("metadata.json" not in found, "a Takeout json sidecar is still ignored")
 
-    # Finding these files is no longer optional (STATUS.md #4). Turning off
-    # "fix wrong extensions" used to hide them entirely - never sorted, never
-    # checked, never deduplicated - rather than merely leaving them alone.
-    stats = run_app(dry_run=True, operation="move", fix_ext=False)
+    stats = run_app(dry_run=True, operation="move")
     check(stats['total_files'] == 3,
-          f"all 3 media files are seen even with extension fixing off "
-          f"(got {stats['total_files']})")
+          f"all 3 media files are seen (got {stats['total_files']})")
 
-    # 2. Organizing renames them to what they actually are
+    # 2. They are organized under the names they arrived with
     run_app(dry_run=False, operation="move", check_corrupt=True)
     files = relpaths()
-    check("Wrong Extension/PXL_20250507_050944066.RAW-01.MP.jpg" in files,
-          f"the truncated photo name was fixed to .jpg (got {files})")
-    check("Wrong Extension/PXL_20251103_094531578.mp4" in files,
-          "the truncated video name was fixed to .mp4")
+    check(any(f.endswith("PXL_20250507_050944066.RAW-01.MP.COVER")
+              for f in files),
+          f"the truncated photo is filed, keeping its name (got {files})")
+    check(any(f.endswith("PXL_20251103_094531578.MP") for f in files),
+          "and so is the truncated video")
+    check(not any(f.startswith("Wrong Extension/") for f in files),
+          "nothing was set aside for being named oddly")
     check((SCRATCH / "notes.txt").exists(), "the text file was left alone")
     check((SCRATCH / "metadata.json").exists(), "the json sidecar was left alone")
 
@@ -686,56 +678,6 @@ def test_each_file_header_is_read_exactly_once_per_check():
           f"(got {len(calls)} for {len(records)} files)")
     check(all(mf.verdict == 'ok' for mf in records.values()),
           "...and every file was still judged")
-    check(all(mf.extension == 'ok' for mf in records.values()),
-          "...and its name still checked against its contents")
-
-
-def test_check_files_separates_names_that_break_from_names_that_do_not():
-    """The health check is what gets read before deciding to touch anything,
-    so it has to say which wrong names actually matter.
-
-    A photo saved as .MOV is handed to a video player and will not open. A
-    WEBP saved as .png displays everywhere and needs nothing done to it.
-    Reporting both as one number turns a handful of real problems into a pile
-    of things to worry about.
-    """
-    make_img(SCRATCH / "fine.jpg", model="SM-S918B", date="2023:05:10 14:30:00")
-    # breaking: a photo wearing a video's extension
-    make_img(SCRATCH / "IMG_0607.MOV", model="SM-S918B",
-             date="2023:05:11 09:00:00", color='green', fmt='JPEG')
-    # breaking: Takeout chopped the extension off entirely
-    make_img(SCRATCH / "PXL_20250507_050944066.RAW-01.MP.COVER",
-             model="SM-S918B", date="2023:05:12 09:00:00", color='purple',
-             fmt='JPEG')
-    # harmless: still an image either way, opens fine everywhere
-    (SCRATCH / "web.png").write_bytes(b'RIFF' + struct.pack('<I', 100)
-                                      + b'WEBPVP8 ' + bytes(96))
-
-    stats = core.run_health_check(
-        make_settings(operation="move", check_corrupt=True), core.Progress())
-    check(stats['misnamed'] == 3, f"3 misnamed in total (got {stats['misnamed']})")
-
-    report = list(SCRATCH.glob("archiveprep_health_*.txt"))[0].read_text(encoding='utf-8')
-    check("2 will not open" in report,
-          f"the summary counts the ones that matter (got: "
-          f"{[l for l in report.splitlines() if 'Wrong file' in l]})")
-    check("1 open anyway" in report, "...and the ones that do not")
-
-    breaking_block = report.split("WILL NOT OPEN")[1].split("OPENS ANYWAY")[0]
-    check("IMG_0607.MOV" in breaking_block,
-          "a photo named .MOV is listed as one that will not open")
-    check("PXL_20250507_050944066.RAW-01.MP.COVER" in breaking_block,
-          "so is a file whose extension Takeout truncated away")
-    check("web.png" not in breaking_block,
-          "the WEBP is not in that list")
-
-    harmless_block = report.split("OPENS ANYWAY")[1]
-    check("web.png" in harmless_block,
-          f"a WEBP named .png is listed as opening anyway (got {harmless_block[:200]})")
-
-    check(relpaths() == sorted(relpaths()), "the check moved nothing")
-    check((SCRATCH / "IMG_0607.MOV").exists(),
-          "...and left every file exactly where it was")
 
 
 def test_thorough_mode_end_to_end():
@@ -1404,98 +1346,37 @@ def test_the_window_and_the_log_file_use_the_same_words():
 # The summary must report what was decided, not what was noticed
 # ---------------------------------------------------------------------------
 
-def _two_wrong_names():
-    """One name that breaks the file, one that costs nothing - plus a file
-    with nothing wrong with it, so the counts cannot come out right by luck."""
-    make_img(SCRATCH / "fine.jpg", model="SM-S918B", date="2023:05:10 14:30:00")
-    # breaking: a photo wearing a video's extension. Deliberately unlike
-    # fine.jpg, so it is not a duplicate as well.
-    make_img(SCRATCH / "IMG_0607.MOV", model="SM-S918B",
-             date="2023:05:11 09:00:00", color='green', fmt='JPEG')
-    # harmless: still an image either way, and opens everywhere
-    (SCRATCH / "web.png").write_bytes(b'RIFF' + struct.pack('<I', 100)
-                                      + b'WEBPVP8 ' + bytes(96))
-
-
-def test_the_summary_does_not_claim_repairs_it_was_told_not_to_make():
-    """A dry run with extension repair switched OFF reported
-
-        Wrongly-named files fixed: 804 -> renamed to the right extension
-        and moved to 'Wrong Extension'
-
-    and had not renamed one of them. The count came from what the scan saw;
-    the renaming it described is gated on a setting the user had turned off.
-    Nothing connected the two, so the summary borrowed the vocabulary of work
-    that never happened.
-    """
-    _two_wrong_names()
-    shown, file_text, stats = _run_capturing_the_window(
-        fix_ext=False, check_corrupt=True)
-    window = "\n".join(shown)
-
-    check(stats['misnamed'] == 2,
-          f"both wrong names are still found and reported "
-          f"(got {stats['misnamed']})")
-    check(stats['misnamed_fixed'] == 0,
-          f"...and none of them was repaired (got {stats['misnamed_fixed']})")
-
-    for where, text in (("window", window), ("log file", file_text)):
-        check("Files whose extension doesn't match their contents: 2" in text,
-              f"the {where} says how many were found, in the same words as "
-              f"the checkbox that controls them")
-        check("renamed to the right extension" not in text,
-              f"the {where} never claims a repair that was switched off")
-        check("that option is off" in text,
-              f"the {where} says why they were left alone")
-
-    check(not any(p.startswith("Wrong Extension/") for p in relpaths()),
-          f"and nothing was planned into Wrong Extension/ (got {relpaths()})")
-
-    # The severity split the Check Files report already makes. Two hundred
-    # wrong names with no way to tell which matter is not a useful number.
-    check("1 will not open at all, 1 open fine anyway" in window,
-          f"the summary says which of them actually matter (got: "
-          f"{[l for l in shown if 'Wrongly-named' in l]})")
-
-    # The header has to record the setting, or the log gives no way to check
-    # what was in force when it said that.
-    check("Fix wrong file extensions: No" in file_text,
-          "the run header records that extension repair was off")
-
-
 def test_a_preview_says_what_it_would_do_and_a_run_says_what_it_did():
     """The summary was the last part of a dry run still written in the past
     tense - under a header saying DRY RUN, above a log where every other line
     says "would move to"."""
-    _two_wrong_names()
-    shown, _text, stats = _run_capturing_the_window(fix_ext=True,
-                                                    check_corrupt=True)
+    make_img(SCRATCH / "fine.jpg", model="SM-S918B", date="2023:05:10 14:30:00")
+    (SCRATCH / "broken.jpg").write_bytes(b"")
+
+    shown, _text, _stats = _run_capturing_the_window(check_corrupt=True)
     preview = "\n".join(shown)
-    check("2 would be renamed to the right extension" in preview,
-          f"a preview says it *would* rename them (got: "
-          f"{[l for l in shown if 'Wrongly-named' in l]})")
-    check("were renamed" not in preview,
-          "...and never says it already did")
+    check("would go to 'Corrupt'" in preview,
+          f"a preview says where the damaged file *would* go (got: "
+          f"{[l for l in shown if 'Damaged' in l]})")
     check("Files that would be processed:" in preview,
           f"the same goes for the file count (got: "
           f"{[l for l in shown if 'processed' in l]})")
+    check("moved to 'Corrupt'" not in preview,
+          "...and never says it already moved anything")
 
-    shown, file_text, stats = _run_capturing_the_window(dry_run=False,
-                                                        fix_ext=True,
-                                                        check_corrupt=True)
+    shown, _text, stats = _run_capturing_the_window(dry_run=False,
+                                                    check_corrupt=True)
     done = "\n".join(shown)
-    check("2 were renamed to the right extension" in done,
+    check("moved to 'Corrupt'" in done,
           f"a real run says it did (got: "
-          f"{[l for l in shown if 'Wrongly-named' in l]})")
-    check("would be renamed" not in done, "...and does not hedge")
-    check("Fix wrong file extensions: Yes" in file_text,
-          "the header records that extension repair was on")
+          f"{[l for l in shown if 'Damaged' in l]})")
+    check("would go to" not in done, "...and does not hedge")
 
     # The number reported is the number that moved, not the number noticed
-    moved = [p for p in relpaths() if p.startswith("Wrong Extension/")]
-    check(stats['misnamed_fixed'] == len(moved) == 2,
-          f"the count is what actually landed in Wrong Extension/ "
-          f"(said {stats['misnamed_fixed']}, found {moved})")
+    aside = [p for p in relpaths() if p.startswith("Corrupt/")]
+    check(stats['damaged_aside'] == len(aside) == 1,
+          f"the count is what actually landed in Corrupt/ "
+          f"(said {stats['damaged_aside']}, found {aside})")
 
 
 def test_a_file_with_no_readable_date_goes_to_unknown_date():

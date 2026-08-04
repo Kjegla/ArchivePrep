@@ -18,6 +18,7 @@ the only thing that explains why the row is allowed to matter.
 import struct
 
 import pytest
+from PIL import Image as PILImage
 
 from conftest import SCRATCH, check, make_img, make_mp4_with_date, truncate
 import archiveprep_core as core
@@ -182,8 +183,11 @@ def _png_named_jpg(d):
 
 
 def _webp_named_png(d):
+    # A real WEBP, not a header stub. It used to be a stub, which passed only
+    # because the check returned 'misnamed' and stopped before decoding it.
+    # Now that a file is checked as what it is, the fixture has to be one.
     p = d / "04165a3a49aaf42842f7f02dc088f4f3.png"
-    p.write_bytes(b'RIFF' + struct.pack('<I', 100) + b'WEBPVP8 ' + bytes(96))
+    PILImage.new('RGB', (40, 30), 'purple').save(p, 'WEBP')
     return p
 
 
@@ -259,15 +263,22 @@ GOLDEN = [
     ("AVI", _avi, 'unchecked',
      "same, for the video formats with no cheap structural check"),
 
-    # --- the name lies about the contents, which is not damage --------------
-    ("JPEG named .MOV", _jpeg_named_mov, 'misnamed',
-     "opens in nothing, because the computer hands it to a video player - "
-     "but the photo inside is perfectly fine and renaming fixes it"),
-    ("JPEG named .HEIC", _jpeg_named_heic, 'misnamed',
+    # --- the name disagrees with the contents, which is not damage ----------
+    # A file is checked as what it is, not as what it is called, so all four
+    # of these are simply healthy. They used to return a fourth verdict,
+    # 'misnamed', which stopped the check before it ever ran - so the one
+    # question this exists to answer went unanswered for exactly the files
+    # whose names could not be trusted. Nothing here is renamed or moved:
+    # the name is the source's business, the contents are ours.
+    ("JPEG named .MOV", _jpeg_named_mov, 'ok',
+     "a photo the computer would hand to a video player. The photo itself is "
+     "fine, and saying so is the whole job"),
+    ("JPEG named .HEIC", _jpeg_named_heic, 'ok',
      "same shape, found in a real iPhone backup"),
-    ("PNG named .jpg", _png_named_jpg, 'misnamed',
-     "harmless in practice, but still a lie about the contents"),
-    ("WEBP named .png", _webp_named_png, 'misnamed',
+    ("PNG named .jpg", _png_named_jpg, 'ok',
+     "checking it as a JPEG would report nonsense; checking it as the PNG it "
+     "is reports the truth"),
+    ("WEBP named .png", _webp_named_png, 'ok',
      "Google Takeout exports some pictures as WEBP under a .png name"),
 ]
 
@@ -299,13 +310,36 @@ def test_golden_corpus_thorough(builder, expected, why):
           f"got {status!r} ({reason})\nthis case exists because: {why}")
 
 
-def test_verdict_reasons_name_the_real_format():
-    """A misnamed file's reason has to say what the file actually is, or the
-    user has no way to judge whether the rename is safe."""
-    _, reason = core.file_health(_jpeg_named_mov(SCRATCH))
-    check("JPEG image" in reason, f"the reason must name the real format ({reason})")
-    _, reason = core.file_health(_webp_named_png(SCRATCH))
-    check("WEBP" in reason, f"...and for WEBP too ({reason})")
+def test_a_wrong_name_hides_nothing_from_the_check():
+    """The reason the fourth verdict had to go.
+
+    A file whose name disagrees with its contents used to return 'misnamed'
+    and stop - so the one question this check exists to answer went
+    unanswered for exactly the files whose names could not be trusted. In one
+    real collection that was 804 of them.
+
+    A wrong name is now no protection: the file is checked as what it is, and
+    a broken photo is caught however it happens to be called.
+    """
+    intact = SCRATCH / "IMG_0607.MOV"
+    intact.write_bytes(_good_jpeg(SCRATCH).read_bytes())
+    status, reason = core.file_health(intact)
+    check(status == 'ok',
+          f"an intact photo called .MOV is healthy (got {status!r}, {reason})")
+
+    broken = SCRATCH / "IMG_0608.MOV"
+    broken.write_bytes(_good_jpeg(SCRATCH).read_bytes())
+    truncate(broken, 200)
+    status, reason = core.file_health(broken)
+    check(status == 'damaged',
+          f"...and a truncated one is still caught, despite the name "
+          f"(got {status!r}, {reason})")
+
+    # The other direction: the wrong name must not manufacture damage either.
+    # Handing a photo to the MP4 structure check reports nonsense, which is
+    # what the removed early return was really protecting against.
+    check('mp4' not in reason.lower() and 'moov' not in reason.lower(),
+          f"the reason talks about the photo, not about MP4 boxes ({reason})")
 
 
 def test_sniff_says_nothing_rather_than_guessing():

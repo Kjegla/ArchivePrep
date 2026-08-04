@@ -51,11 +51,6 @@ class ArchivePrepGUI:
         self.check_corrupt = tk.BooleanVar(value=False)
         self.corrupt_thorough = tk.BooleanVar(value=False)
         self.cleanup_empty = tk.BooleanVar(value=True)
-        # Off by default: repairing extensions is a maintenance extra the
-        # application happens to be capable of because it already reads file
-        # headers. It was never one of the problems this exists to solve, so
-        # it should not be something you have to notice and switch off.
-        self.fix_extensions = tk.BooleanVar(value=False)
         # Log search state: where every match starts, and which one Next and
         # Previous are currently sitting on.
         self.log_search = tk.StringVar()
@@ -64,7 +59,6 @@ class ArchivePrepGUI:
         self._dropped_lines = 0
         self.processing = False
         self.last_undo_file = None
-        self.last_rename_undo_file = None  # undo for the extension fixes alone
         self.cached_plan = None  # preview results reusable by Execute
         self.queue = queue.Queue()
 
@@ -224,12 +218,6 @@ class ArchivePrepGUI:
             variable=self.corrupt_thorough)
         self.thorough_checkbox.pack(anchor=tk.W, pady=(0, 3))
 
-        self.fixext_checkbox = ttk.Checkbutton(
-            safety_frame,
-            text="Fix files whose extension doesn't match their contents",
-            variable=self.fix_extensions)
-        self.fixext_checkbox.pack(anchor=tk.W, pady=3)
-
         self.cleanup_checkbox = ttk.Checkbutton(
             safety_frame,
             text="Delete empty folders left behind (Move only)",
@@ -238,9 +226,8 @@ class ArchivePrepGUI:
 
         safety_note = ttk.Label(
             safety_frame,
-            text="Nothing is ever deleted. Duplicates go to 'Duplicates',\n"
-                 "damaged files to 'Corrupt', and wrongly-named ones are\n"
-                 "renamed into 'Wrong Extension'. Undo puts it all back.",
+            text="Nothing is ever deleted. Duplicates go to 'Duplicates'\n"
+                 "and damaged files to 'Corrupt'. Undo puts it all back.",
             font=('Segoe UI', 9), foreground='#888888', justify=tk.LEFT)
         safety_note.pack(anchor=tk.W, pady=(6, 2))
 
@@ -266,12 +253,7 @@ class ArchivePrepGUI:
                                    command=self.undo_last_operation, state=tk.DISABLED)
         self.undo_btn.pack(side=tk.LEFT, padx=4)
 
-        self.undo_renames_btn = ttk.Button(button_frame, text="Undo Renames",
-                                           command=self.undo_renames,
-                                           state=tk.DISABLED)
-        self.undo_renames_btn.pack(side=tk.LEFT, padx=4)
-
-        self.stats_btn = ttk.Button(button_frame, text="Statistics",
+        self.stats_btn = ttk.Button(button_frame, text="Summary",
                                     command=self.show_statistics, state=tk.DISABLED)
         self.stats_btn.pack(side=tk.LEFT, padx=4)
 
@@ -412,59 +394,54 @@ class ArchivePrepGUI:
             state=tk.NORMAL if self.check_corrupt.get() else tk.DISABLED)
 
     def show_statistics(self):
-        """Show statistics in a popup window."""
+        """What the run found, in one place.
+
+        This is where the tally lives. The run log says what changed as it
+        goes; this answers "so what did it do?" afterwards, and it is short on
+        purpose - five numbers you would actually act on, then the breakdown
+        by camera and year.
+        """
         if not self.stats['total_files']:
-            messagebox.showinfo("Statistics", "No statistics available yet. Run an operation first!")
+            messagebox.showinfo(
+                "Summary", "Nothing to summarise yet - run a preview first.")
             return
 
         stats_window = tk.Toplevel(self.root)
-        stats_window.title("Organization Statistics")
-        stats_window.geometry("500x600")
+        stats_window.title("Run Summary")
+        stats_window.geometry("460x560")
 
         stats_text = scrolledtext.ScrolledText(stats_window, wrap=tk.WORD,
-                                               width=60, height=30,
+                                               width=56, height=28,
                                                font=('Consolas', 10),
                                                borderwidth=0)
         stats_text.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
 
-        report = "=" * 50 + "\n"
-        report += "ARCHIVE PREPARATION STATISTICS\n"
-        report += "=" * 50 + "\n\n"
+        s = self.stats
+        lines = [
+            f"Files scanned      {s['total_files']}",
+            f"Files organized    {s['processed']}",
+            f"Duplicates found   {s['content_duplicates']}"
+            f"  ({s['duplicate_bytes'] / (1024 * 1024):.0f} MB)",
+            f"Damaged files      {s['damaged']}",
+            f"Unknown dates      {s['no_date']}",
+        ]
+        if s['already_organized']:
+            lines.append(f"Already in place   {s['already_organized']}")
+        if s['errors']:
+            lines.append(f"Errors             {s['errors']}")
 
-        report += f"Total files scanned:       {self.stats['total_files']}\n"
-        report += f"Successfully processed:    {self.stats['processed']}\n"
-        report += f"No metadata found:         {self.stats['no_metadata']}\n"
-        report += f"Errors encountered:        {self.stats['errors']}\n"
-        report += f"Screenshots detected:      {self.stats['screenshots']}\n"
-        report += f"Identical duplicates:      {self.stats['duplicates']}\n"
-        report += (f"Duplicate copies aside:   "
-                   f"{self.stats['content_duplicates']} "
-                   f"({self.stats['duplicate_bytes'] / (1024 * 1024):.2f} MB)\n")
-        report += f"Damaged files found:       {self.stats['damaged']}\n"
-        report += f"Wrong file extension:      {self.stats['misnamed']}\n"
-        report += f"Could not be checked:      {self.stats['unchecked']}\n"
-        report += f"Empty folders removed:     {self.stats['empty_folders_removed']}\n"
-        report += f"Already organized:         {self.stats['already_organized']}\n"
-        report += f"Total size processed:      {self.stats['total_size_mb']:.2f} MB\n"
+        report = "\n".join(lines) + "\n"
 
-        if self.stats['by_model']:
-            report += "\n" + "=" * 50 + "\n"
-            report += "FILES BY CAMERA MODEL\n"
-            report += "=" * 50 + "\n"
-            for model, count in sorted(self.stats['by_model'].items(),
+        if s['by_model']:
+            report += "\nBy camera\n"
+            for model, count in sorted(s['by_model'].items(),
                                        key=lambda x: x[1], reverse=True):
-                report += f"  {model}: {count} files\n"
+                report += f"  {model}: {count}\n"
 
-        if self.stats['by_year']:
-            report += "\n" + "=" * 50 + "\n"
-            report += "FILES BY YEAR\n"
-            report += "=" * 50 + "\n"
-            for year, count in sorted(self.stats['by_year'].items()):
-                report += f"  {year}: {count} files\n"
-
-        if self.stats.get('duration_seconds'):
-            rate = self.stats['processed'] / self.stats['duration_seconds']
-            report += f"\nProcessing speed:          {rate:.1f} files/second\n"
+        if s['by_year']:
+            report += "\nBy year\n"
+            for year, count in sorted(s['by_year'].items()):
+                report += f"  {year}: {count}\n"
 
         stats_text.insert(1.0, report)
         stats_text.config(state=tk.DISABLED)
@@ -483,17 +460,9 @@ class ArchivePrepGUI:
             undo_files = sorted(list(Path(folder).glob("archiveprep_undo_*.jsonl"))
                                 + list(Path(folder).glob("archiveprep_undo_*.json")))
             self.last_undo_file = str(undo_files[-1]) if undo_files else None
-            rename_undos = sorted(
-                list((Path(folder) / core.WRONG_EXT_FOLDER)
-                     .glob("archiveprep_undo_renames_*.jsonl"))
-                + list((Path(folder) / core.WRONG_EXT_FOLDER)
-                       .glob("archiveprep_undo_renames_*.json")))
-            self.last_rename_undo_file = (str(rename_undos[-1])
-                                          if rename_undos else None)
             if not self.processing:
-                self.undo_btn.config(state=tk.NORMAL if self.last_undo_file else tk.DISABLED)
-                self.undo_renames_btn.config(
-                    state=tk.NORMAL if self.last_rename_undo_file else tk.DISABLED)
+                self.undo_btn.config(
+                    state=tk.NORMAL if self.last_undo_file else tk.DISABLED)
 
     def clear_log(self):
         """Clear the output log."""
@@ -539,19 +508,14 @@ class ArchivePrepGUI:
                     self.cancel_btn.config(state=tk.DISABLED)
                     self.stats_btn.config(state=tk.NORMAL if self.stats['total_files'] > 0 else tk.DISABLED)
                     self.undo_btn.config(state=tk.NORMAL if self.last_undo_file else tk.DISABLED)
-                    self.undo_renames_btn.config(
-                        state=tk.NORMAL if self.last_rename_undo_file else tk.DISABLED)
                 elif action == "disable_buttons":
                     self.preview_btn.config(state=tk.DISABLED)
                     self.execute_btn.config(state=tk.DISABLED)
                     self.check_btn.config(state=tk.DISABLED)
                     self.undo_btn.config(state=tk.DISABLED)
-                    self.undo_renames_btn.config(state=tk.DISABLED)
                     self.cancel_btn.config(state=tk.NORMAL)
                 elif action == "undo_available":
                     self.last_undo_file = value
-                elif action == "rename_undo_available":
-                    self.last_rename_undo_file = value
                 elif action == "plan_stale":
                     self.cached_plan = None
                 elif action == "leftover_folders":
@@ -666,7 +630,6 @@ class ArchivePrepGUI:
             check_corrupt=self.check_corrupt.get(),
             corrupt_thorough=self.corrupt_thorough.get(),
             cleanup_empty=self.cleanup_empty.get(),
-            fix_extensions=self.fix_extensions.get(),
             max_threads=self.max_threads,
         )
 
@@ -777,38 +740,6 @@ class ArchivePrepGUI:
             core.run_undo(Path(undo_file), record, progress, label=label)
 
         self._run_in_background(work)
-
-    def undo_renames(self):
-        """Undo only the extension fixes, leaving the rest of the run alone."""
-        if self.processing:
-            return
-        undo_file = self.last_rename_undo_file
-        if not undo_file or not Path(undo_file).exists():
-            messagebox.showinfo("Undo Renames", "No renames to undo.")
-            self.undo_renames_btn.config(state=tk.DISABLED)
-            return
-
-        try:
-            record = core.read_undo(undo_file)
-        except (OSError, ValueError) as e:
-            messagebox.showerror("Undo Renames",
-                                 f"Could not read the rename record:\n{e}")
-            return
-
-        entries = record.get('entries', [])
-        if not entries:
-            messagebox.showinfo("Undo Renames", "The rename record is empty.")
-            return
-
-        if not messagebox.askyesno(
-                "Undo Renames",
-                f"Put {len(entries)} renamed file(s) back where they were, "
-                f"under their original names?\n\n"
-                f"Everything else this run did stays as it is."):
-            return
-
-        self.last_rename_undo_file = None
-        self._start_undo(undo_file, record, label="renames")
 
     def undo_last_operation(self):
         """Undo the most recent execute run (main thread entry point)."""

@@ -66,7 +66,6 @@ def make_app(tk_root, **settings):
     app.check_corrupt.set(s.check_corrupt)
     app.corrupt_thorough.set(s.corrupt_thorough)
     app.cleanup_empty.set(s.cleanup_empty)
-    app.fix_extensions.set(s.fix_extensions)
     return root, app
 
 
@@ -140,20 +139,13 @@ def test_preview_caches_a_plan_and_execute_consumes_it(tk_root):
 
 
 def test_the_defaults_the_window_opens_with(tk_root):
-    """What a first-time user gets without touching anything.
-
-    Extension repair in particular must be off: it was never one of the
-    problems this application exists to solve, and a maintenance extra should
-    not be something you have to notice and switch off.
-    """
+    """What a first-time user gets without touching anything."""
     import tkinter as tk
     root = tk.Toplevel(tk_root)
     root.withdraw()
     app = ap.ArchivePrepGUI(root)
     try:
         s = app._snapshot_settings()
-        check(s.fix_extensions is False,
-              f"extension repair is off by default (got {s.fix_extensions})")
         check(s.operation == "move", f"operation defaults to move (got {s.operation})")
         check(s.dedupe_content is True,
               "finding duplicates by content is on - it is a core capability")
@@ -253,5 +245,45 @@ def test_cancel_reaches_the_core(tk_root):
               "the Cancel button sets the flag the core watches")
         app.progress.cancel.clear()
         check(app.progress.cancelled is False, "and a new run clears it again")
+    finally:
+        root.destroy()
+
+
+def test_the_summary_window_opens_on_a_real_run(tk_root):
+    """The one window nothing else exercises.
+
+    It reads the statistics dictionary by key, so a stat the core stops
+    producing breaks it with a KeyError - and every other test in this suite
+    would still pass, because none of them opens it. That is exactly what
+    happened when extension repair was removed: the window still asked for a
+    count that no longer existed.
+    """
+    build_source()
+    root, app = make_app(tk_root, operation="copy", check_corrupt=True)
+    try:
+        app.preview_operation()
+        wait_for_idle(app)
+        check(app.stats['total_files'] > 0, "the run produced statistics")
+
+        app.show_statistics()          # KeyError here if a stat went missing
+        panes = [w for w in app.root.winfo_children()
+                 + list(app.root.master.winfo_children())
+                 if w.winfo_class() == 'Toplevel']
+        summaries = [w for w in panes if w.title() == "Run Summary"]
+        check(len(summaries) == 1,
+              f"the summary window opened (got {[w.title() for w in panes]})")
+
+        # ScrolledText re-parents itself into a Frame, so find the Text
+        def text_widgets(widget):
+            for child in widget.winfo_children():
+                if child.winfo_class() == 'Text':
+                    yield child
+                yield from text_widgets(child)
+
+        body = next(text_widgets(summaries[0])).get('1.0', 'end')
+        for wanted in ("Files scanned", "Files organized", "Duplicates found",
+                       "Damaged files", "Unknown dates"):
+            check(wanted in body, f"the summary reports {wanted!r}")
+        summaries[0].destroy()
     finally:
         root.destroy()

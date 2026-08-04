@@ -162,7 +162,7 @@ def build_source():
 def make_settings(operation="copy", subfolder="year-month", separate_raw=True,
                   separate_screenshots=True, multithread=True,
                   include_subfolders=False, dedupe=False, check_corrupt=False,
-                  thorough=False, cleanup_empty=True, fix_ext=True):
+                  thorough=False, cleanup_empty=True):
     """Exactly what ArchivePrepGUI._snapshot_settings() hands the core."""
     return SimpleNamespace(
         source=str(SCRATCH),
@@ -176,7 +176,6 @@ def make_settings(operation="copy", subfolder="year-month", separate_raw=True,
         check_corrupt=check_corrupt,
         corrupt_thorough=thorough,
         cleanup_empty=cleanup_empty,
-        fix_extensions=fix_ext,
         max_threads=4,
     )
 
