@@ -247,7 +247,7 @@ def test_keeper_ranking():
         return core.MediaFile(path=path, **fields)
 
     rank = core._keeper_rank
-    healthy = record("a.jpg", verdict='ok')
+    healthy = record("a.jpg", verdict='healthy')
     damaged = record("b.jpg", verdict='damaged', verdict_reason='truncated')
     check(rank(healthy) < rank(damaged),
           "a healthy copy always outranks a damaged one")
@@ -640,14 +640,14 @@ def test_standalone_check_files_is_read_only():
         make_settings(operation="move", check_corrupt=True), core.Progress())
     check(relpaths() == before, "check run moved nothing")
     check(stats['damaged'] == 1, f"1 damaged file reported (got {stats['damaged']})")
-    check(stats['unchecked'] == 1,
-          f"1 unchecked RAW reported (got {stats['unchecked']})")
+    check(stats['unknown'] == 1,
+          f"1 RAW of unknown health reported (got {stats['unknown']})")
     check(stats['total_files'] == 3, f"3 files scanned (got {stats['total_files']})")
     reports = list(SCRATCH.glob("archiveprep_health_*.txt"))
     check(len(reports) == 1, "a health report was written")
     report_text = reports[0].read_text(encoding='utf-8')
     check("bad.jpg" in report_text, "the damaged file is named in the report")
-    check("raw.arw" in report_text, "the unchecked RAW is listed separately")
+    check("raw.arw" in report_text, "the RAW is listed under Unknown")
 
 
 def test_each_file_header_is_read_exactly_once_per_check():
@@ -676,7 +676,7 @@ def test_each_file_header_is_read_exactly_once_per_check():
     check(len(calls) == len(records),
           f"one header read per file, not one per question "
           f"(got {len(calls)} for {len(records)} files)")
-    check(all(mf.verdict == 'ok' for mf in records.values()),
+    check(all(mf.verdict == 'healthy' for mf in records.values()),
           "...and every file was still judged")
 
 
@@ -1175,7 +1175,7 @@ def test_manifest_records_every_file_and_what_became_of_it():
           f"...dated from EXIF (got {cam1['date_source']})")
     check(cam1['target_path'].startswith('Samsung Galaxy S23 Ultra'),
           f"...and the manifest says where it went (got {cam1['target_path']})")
-    check(cam1['verdict'] in ('ok', 'unchecked'),
+    check(cam1['verdict'] in ('healthy', 'unknown'),
           f"...with its integrity verdict (got {cam1['verdict']})")
 
     # A RAW has no EXIF this application reads, so it takes both its date and

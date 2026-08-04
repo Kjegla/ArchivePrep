@@ -7,7 +7,7 @@ real collections - a 3,322-file Google Takeout export and an 815-file iPhone
 backup - and never showed up against fixtures.
 
 This is the regression net for the parts of the application that must not
-change: truncation detection, format sniffing, and the honest "unchecked"
+change: truncation detection, format sniffing, and the honest "unknown"
 verdict. Anything that touches those runs against this table first.
 
 **Adding a case is a one-line edit.** When a real archive turns up a file
@@ -204,13 +204,13 @@ def _mp4_named_mov(d):
 
 GOLDEN = [
     # --- ordinary files, which must simply pass -----------------------------
-    ("intact JPEG", _good_jpeg, 'ok',
+    ("intact JPEG", _good_jpeg, 'healthy',
      "the baseline: an ordinary camera photo"),
-    ("intact PNG", _good_png, 'ok',
+    ("intact PNG", _good_png, 'healthy',
      "the baseline for the other format with a reliable end marker"),
-    ("well-formed MP4", _good_mp4, 'ok',
+    ("well-formed MP4", _good_mp4, 'healthy',
      "the baseline for the container walk"),
-    ("real video named .mov", _mp4_named_mov, 'ok',
+    ("real video named .mov", _mp4_named_mov, 'healthy',
      "MP4 and MOV are interchangeable in practice; nagging about a .mov "
      "that is technically an .mp4 would flag half an iPhone library"),
 
@@ -238,29 +238,29 @@ GOLDEN = [
 
     # --- perfectly fine, and must never be called damaged -------------------
     # All four were false positives found against real collections, not fixtures.
-    ("complete JPEG + 3 MB of zero padding", _zero_padded_jpeg, 'ok',
+    ("complete JPEG + 3 MB of zero padding", _zero_padded_jpeg, 'healthy',
      "recovery tools, card readers and backup exports pad a complete file "
      "out to a block boundary, leaving the end marker megabytes from the end"),
-    ("iPhone Portrait / MPO", _mpo_portrait, 'ok',
+    ("iPhone Portrait / MPO", _mpo_portrait, 'healthy',
      "two images in one file, and it is usually the SECOND one that got cut "
      "off, not the photo. Found in a real 815-file iPhone backup"),
-    ("Pixel motion photo", _pixel_motion_photo, 'ok',
+    ("Pixel motion photo", _pixel_motion_photo, 'healthy',
      "Pixel welds a short MP4 onto the back of an ordinary JPEG"),
-    ("Samsung motion photo", _samsung_motion_photo, 'ok',
+    ("Samsung motion photo", _samsung_motion_photo, 'healthy',
      "Samsung does the same thing with a different trailer format - which is "
      "why the rule is about the photo's own data finishing, not about what "
      "the file ends with"),
-    ("complete photo + arbitrary tail", _photo_with_arbitrary_tail, 'ok',
+    ("complete photo + arbitrary tail", _photo_with_arbitrary_tail, 'healthy',
      "generalises the two above: anything after a finished photo is somebody "
      "else's business"),
-    ("photo with an embedded preview", _with_embedded_preview, 'ok',
+    ("photo with an embedded preview", _with_embedded_preview, 'healthy',
      "the intact counterpart of the truncated-past-its-preview case"),
 
     # --- formats we cannot verify, which must say so rather than guess ------
-    ("RAW", _raw, 'unchecked',
+    ("RAW", _raw, 'unknown',
      "cannot be verified without decoding it; reported honestly so a good "
      "file is never wrongly accused"),
-    ("AVI", _avi, 'unchecked',
+    ("AVI", _avi, 'unknown',
      "same, for the video formats with no cheap structural check"),
 
     # --- the name disagrees with the contents, which is not damage ----------
@@ -270,15 +270,15 @@ GOLDEN = [
     # question this exists to answer went unanswered for exactly the files
     # whose names could not be trusted. Nothing here is renamed or moved:
     # the name is the source's business, the contents are ours.
-    ("JPEG named .MOV", _jpeg_named_mov, 'ok',
+    ("JPEG named .MOV", _jpeg_named_mov, 'healthy',
      "a photo the computer would hand to a video player. The photo itself is "
      "fine, and saying so is the whole job"),
-    ("JPEG named .HEIC", _jpeg_named_heic, 'ok',
+    ("JPEG named .HEIC", _jpeg_named_heic, 'healthy',
      "same shape, found in a real iPhone backup"),
-    ("PNG named .jpg", _png_named_jpg, 'ok',
+    ("PNG named .jpg", _png_named_jpg, 'healthy',
      "checking it as a JPEG would report nonsense; checking it as the PNG it "
      "is reports the truth"),
-    ("WEBP named .png", _webp_named_png, 'ok',
+    ("WEBP named .png", _webp_named_png, 'healthy',
      "Google Takeout exports some pictures as WEBP under a .png name"),
 ]
 
@@ -324,7 +324,7 @@ def test_a_wrong_name_hides_nothing_from_the_check():
     intact = SCRATCH / "IMG_0607.MOV"
     intact.write_bytes(_good_jpeg(SCRATCH).read_bytes())
     status, reason = core.file_health(intact)
-    check(status == 'ok',
+    check(status == 'healthy',
           f"an intact photo called .MOV is healthy (got {status!r}, {reason})")
 
     broken = SCRATCH / "IMG_0608.MOV"

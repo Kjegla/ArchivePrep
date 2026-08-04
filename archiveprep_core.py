@@ -898,17 +898,21 @@ def file_health(file_path, thorough=False, probe=None):
     """Would this file be safe to put in an archive?
 
     Returns (status, reason) where status is:
-      'ok'        - opened and passed every check we can apply
-      'damaged'   - definitely broken (empty, unreadable, or truncated)
-      'unchecked' - a format we cannot verify (most RAW, AVI/MKV/WMV...).
-                    Said honestly rather than guessed at, so a good file is
-                    never wrongly called broken.
+      'healthy' - opened and passed every check we can apply
+      'damaged' - definitely broken (empty, unreadable, or truncated)
+      'unknown' - a format we cannot verify (most RAW, AVI/MKV/WMV...).
+                  Said honestly rather than guessed at, so a good file is
+                  never wrongly called broken.
 
-    Three answers, and only three, because there is only one question. It
-    used to return a fourth, 'misnamed', for a file whose extension disagreed
-    with its contents - which is a fact about a filename, not about whether
-    the file is safe to keep. Worse, it returned early, so those files were
-    never health-checked at all: 804 of them in one real collection.
+    Three answers, and only three, because there is only one question. They
+    are the words the window uses too - a translation layer between what the
+    code calls a thing and what the user reads is how the window and the log
+    drifted apart once already.
+
+    It used to return a fourth, 'misnamed', for a file whose extension
+    disagreed with its contents - which is a fact about a filename, not about
+    whether the file is safe to keep. Worse, it returned early, so those files
+    were never health-checked at all: 804 of them in one real collection.
 
     Never raises.
     """
@@ -931,19 +935,19 @@ def file_health(file_path, thorough=False, probe=None):
 
     if suffix in MVHD_CAPABLE_EXTS:
         ok, reason = _mp4_structure_ok(file_path)
-        return ('ok', "") if ok else ('damaged', reason)
+        return ('healthy', "") if ok else ('damaged', reason)
 
     if suffix in VIDEO_EXTS:
-        return 'unchecked', "video format we cannot verify without decoding"
+        return 'unknown', "video format we cannot verify without decoding"
 
     if suffix in RAW_EXTS:
-        return 'unchecked', "RAW format we cannot verify"
+        return 'unknown', "RAW format we cannot verify"
 
     if suffix not in IMAGE_EXTS:
-        return 'unchecked', "unrecognized format"
+        return 'unknown', "unrecognized format"
 
     if not PIL_AVAILABLE:
-        return 'unchecked', "Pillow is not installed"
+        return 'unknown', "Pillow is not installed"
 
     # Header / structure check. verify() consumes the image object, so a
     # thorough decode has to reopen the file afterwards.
@@ -966,7 +970,7 @@ def file_health(file_path, thorough=False, probe=None):
         except Exception as e:
             return 'damaged', f"image will not fully decode ({e})"
 
-    return 'ok', ""
+    return 'healthy', ""
 
 
 def read_media_metadata(file_path):
@@ -1127,7 +1131,7 @@ class MediaFile:
     is_screenshot: bool = False
 
     # can it be trusted - exactly what file_health() said
-    verdict: str = 'unchecked'             # ok | damaged | unchecked
+    verdict: str = 'unknown'             # healthy | damaged | unknown
     verdict_reason: str = ''
 
     # what the run decided
@@ -1165,7 +1169,7 @@ def _empty_stats():
         'duplicates': 0,
         'content_duplicates': 0,
         'damaged': 0,
-        'unchecked': 0,
+        'unknown': 0,
         # ...and what was decided about them, which is not the same number.
         # Setting a damaged file aside is gated on the user's setting, and a
         # file that is also a duplicate goes to Duplicates instead. The
@@ -1463,7 +1467,7 @@ def _keeper_rank(mf):
     Lowest wins. Health comes first on purpose: a damaged copy can never be
     kept over a healthy one.
     """
-    health_rank = {'ok': 0, 'unchecked': 1, 'damaged': 2}.get(mf.verdict, 1)
+    health_rank = {'healthy': 0, 'unknown': 1, 'damaged': 2}.get(mf.verdict, 1)
     richness = (0 if mf.camera_model else 1) + (0 if mf.captured_at else 1)
     looks_copied = 1 if looks_like_copy_name(mf.path.stem) else 0
     try:
@@ -1839,10 +1843,10 @@ def _write_run_summary(progress, log_file, stats, duration, dry_run):
         say(progress, log_file,
             f"No readable date: {stats['no_date']} -> "
             f"{tense('would go to', 'filed under')} 'Unknown Date'")
-    if stats['unchecked']:
+    if stats['unknown']:
         say(progress, log_file,
-            f"Files that could not be checked: {stats['unchecked']} "
-            f"(RAW / some video formats)")
+            f"Unknown health: {stats['unknown']} "
+            f"(RAW / some video formats - not a sign they are broken)")
     if stats['duplicates']:
         say(progress, log_file,
             f"Identical duplicates {tense('to skip', 'skipped')}: "
@@ -1967,10 +1971,9 @@ def organize_photos(settings, progress, dry_run=True):
             return stats, cached_plan
         verdicts = [mf.verdict for mf in records.values()]
         stats['damaged'] = verdicts.count('damaged')
-        stats['unchecked'] = verdicts.count('unchecked')
-        fine = len(verdicts) - stats['damaged'] - stats['unchecked']
-        report(f"  {fine} fine, {stats['damaged']} damaged, "
-               f"{stats['unchecked']} could not be checked")
+        stats['unknown'] = verdicts.count('unknown')
+        report(f"  {verdicts.count('healthy')} healthy, "
+               f"{stats['damaged']} damaged, {stats['unknown']} unknown")
 
     # Files from one shutter press belong together, and share a date
     captures = _group_captures(records)
@@ -2860,10 +2863,10 @@ def run_health_check(settings, progress):
     by_name = lambda p: str(p).lower()
     damaged = sorted((f for f, (s, _) in health.items() if s == 'damaged'),
                      key=by_name)
-    unchecked = [f for f, (s, _) in health.items() if s == 'unchecked']
-    healthy = len(health) - len(damaged) - len(unchecked)
+    unknown = [f for f, (s, _) in health.items() if s == 'unknown']
+    healthy = len(health) - len(damaged) - len(unknown)
     stats['damaged'] = len(damaged)
-    stats['unchecked'] = len(unchecked)
+    stats['unknown'] = len(unknown)
     stats['processed'] = len(health)
 
     run_stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -2877,17 +2880,17 @@ def run_health_check(settings, progress):
             f.write("=" * 60 + "\n\n")
             f.write(f"Healthy: {healthy}\n")
             f.write(f"Damaged: {len(damaged)}\n")
-            f.write(f"Unknown: {len(unchecked)}\n\n")
+            f.write(f"Unknown: {len(unknown)}\n\n")
             if damaged:
                 f.write("DAMAGED - do not archive these without looking\n")
                 for path in damaged:
                     f.write(f"  {path.relative_to(source_path)} - "
                             f"{health[path][1]}\n")
                 f.write("\n")
-            if unchecked:
+            if unknown:
                 f.write("UNKNOWN - a format we cannot verify. This does NOT "
                         "mean they are broken.\n")
-                for path in sorted(unchecked, key=lambda p: str(p).lower()):
+                for path in sorted(unknown, key=lambda p: str(p).lower()):
                     f.write(f"  {path.relative_to(source_path)}\n")
     except OSError as e:
         progress.log(f"[warn] could not write the report file: {e}")
@@ -2896,7 +2899,7 @@ def run_health_check(settings, progress):
     progress.log("RESULTS:")
     progress.log(f"Healthy:  {healthy}")
     progress.log(f"Damaged:  {len(damaged)}")
-    progress.log(f"Unknown:  {len(unchecked)} "
+    progress.log(f"Unknown:  {len(unknown)} "
                  f"(RAW / some video formats - not a sign they are broken)")
 
     if damaged:
